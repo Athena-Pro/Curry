@@ -79,7 +79,7 @@ Curry uses a two-tier database model. Understanding this split is required befor
 ### Directory Layout
 
 ```
-C:\AI-Local\Curry\
+C:\path\to\Curry\
     curry_core.db          <- global: model registrations, shared constants, system prompts
     curry_backup.py
     backups\
@@ -97,7 +97,7 @@ C:\AI-Local\Curry\
 {
     "project": "my-project",
     "version": 1,
-    "core_db": "C:/AI-Local/Curry/curry_core.db",
+    "core_db": "C:/path/to/Curry/curry_core.db",
     "local_db": ".curry/curry.db",
     "default_model": "claude-sonnet-4-6",
     "default_model_version": 1,
@@ -138,7 +138,7 @@ This is enforced at the driver level, not by convention. Any write attempt throu
 
 ```python
 # Admin path -- always done outside a session
-with Curry(r"C:\AI-Local\Curry\curry_core.db") as admin:
+with Curry(r"C:\path\to\Curry\curry_core.db") as admin:
     admin.register_model("claude-sonnet-4-6", 1, checkpoint_hash="...", temperature=1.0, top_p=0.9, max_tokens=8192)
 ```
 
@@ -167,10 +167,10 @@ Core and local DBs both open with `PRAGMA journal_mode=WAL`. WAL allows safe onl
 
 ### Rotation Script
 
-`curry_backup.py` in `C:\AI-Local\Curry\` handles timestamped rotation with post-backup `PRAGMA integrity_check`. Run via Windows Task Scheduler daily at 03:00:
+`curry_backup.py` in `C:\path\to\Curry\` handles timestamped rotation with post-backup `PRAGMA integrity_check`. Run via Windows Task Scheduler daily at 03:00:
 
 ```
-schtasks /create /tn "CurryDailyBackup" /tr "python C:\AI-Local\Curry\curry_backup.py" /sc daily /st 03:00 /f
+schtasks /create /tn "CurryDailyBackup" /tr "python C:\path\to\Curry\curry_backup.py" /sc daily /st 03:00 /f
 ```
 
 Retention: 14 daily rotations for `curry_core.db`. Project local DBs should run the same script pointed at `.curry/curry.db` with their own scheduler task or pre-run hook.
