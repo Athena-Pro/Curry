@@ -117,10 +117,12 @@ db.declare_function(
     constant_bindings={"rate": 2, "tax": 1},  # pinned to exact versions
     expected_args=["amount"],                  # runtime args declared explicitly
     is_pure=True,                              # enables execution cache
+    description="Compute final price after discount and tax (rate and tax constants).",
+    arg_descriptions={"amount": "Gross price in dollars (e.g. 450.00)"},
 )
 ```
 
-`expected_args` is stored in the database and drives MCP tool schema generation — each function's tool input schema is derived from it at server startup.
+`expected_args` is stored in the database and drives MCP tool schema generation. `description` and `arg_descriptions` are surfaced as the MCP tool description and per-argument property hints respectively, preventing unit ambiguity for non-obvious arguments like rates and proportions (see Lag Pattern 2 in SKILL.md).
 
 ### Models
 
@@ -273,7 +275,6 @@ pip install mcp         # MCP server
 - `get_stale_functions()` — detect functions bound to retired dependencies
 - `upsert_prompt()` / `render_prompt()` — first-class versioned prompt registry
 - `search_inferences` SQL-level token-count filtering (currently applied in Python)
-- Dynamic per-function MCP tools generated from `expected_args` at server startup
 
 **Later**
 - `archive_inference_output(inference_id, codec)` — compressed blob storage for large outputs

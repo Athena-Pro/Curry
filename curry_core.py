@@ -139,6 +139,16 @@ class Curry:
         except sqlite3.OperationalError:
             pass
 
+        try:
+            cursor.execute("ALTER TABLE functions ADD COLUMN description TEXT")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            cursor.execute("ALTER TABLE functions ADD COLUMN arg_descriptions TEXT")
+        except sqlite3.OperationalError:
+            pass
+
         # Function dependencies: track exact versions used
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS function_dependencies (
@@ -581,8 +591,21 @@ class Curry:
         function_bindings: Optional[Dict[str, int]] = None,
         is_pure: bool = False,
         expected_args: Optional[List[str]] = None,
+        description: Optional[str] = None,
+        arg_descriptions: Optional[Dict[str, str]] = None,
     ) -> None:
-        """Declare a versioned function with exact dependency versions."""
+        """Declare a versioned function with exact dependency versions.
+
+        description: Human-readable summary of what the function does and which
+            constants it binds to. Used as the MCP tool description. Example:
+            'Apply the standard markup (markup_rate constant) to a wholesale cost.'
+
+        arg_descriptions: Per-argument hint strings surfaced as MCP tool property
+            descriptions. Non-obvious args (rates, proportions, enums) MUST include
+            a unit hint and example value. Example:
+            {'rate': 'Annual rate as a decimal fraction (e.g. 0.06 for 6%)',
+             'years': 'Duration in whole years (e.g. 5)'}
+        """
         constant_bindings = constant_bindings or {}
         function_bindings = function_bindings or {}
 
@@ -627,9 +650,18 @@ class Curry:
         # Insert function
         cursor.execute(
             """INSERT INTO functions
-               (name, version, body, constant_bindings, function_bindings, is_pure, expected_args)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (name, version, body, json.dumps(constant_bindings), json.dumps(function_bindings), is_pure, json.dumps(expected_args) if expected_args is not None else None)
+               (name, version, body, constant_bindings, function_bindings, is_pure,
+                expected_args, description, arg_descriptions)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                name, version, body,
+                json.dumps(constant_bindings),
+                json.dumps(function_bindings),
+                is_pure,
+                json.dumps(expected_args) if expected_args is not None else None,
+                description,
+                json.dumps(arg_descriptions) if arg_descriptions is not None else None,
+            )
         )
 
         # Record dependencies
@@ -655,7 +687,8 @@ class Curry:
         """Retrieve a function by exact version."""
         cursor = self.conn.cursor()
         cursor.execute(
-            """SELECT name, version, body, constant_bindings, function_bindings, is_pure, expected_args, retired_at
+            """SELECT name, version, body, constant_bindings, function_bindings, is_pure,
+                      expected_args, description, arg_descriptions, retired_at
                FROM functions
                WHERE name = ? AND version = ?""",
             (name, version)
@@ -677,6 +710,8 @@ class Curry:
             "function_bindings": json.loads(row["function_bindings"]),
             "is_pure": bool(row["is_pure"]),
             "expected_args": json.loads(row["expected_args"]) if row["expected_args"] is not None else None,
+            "description": row["description"],
+            "arg_descriptions": json.loads(row["arg_descriptions"]) if row["arg_descriptions"] is not None else None,
         }
 
     def retire_function(
@@ -700,7 +735,10 @@ class Curry:
     def list_functions(self, active_only: bool = True) -> List[Dict[str, Any]]:
         """List all functions with their latest versions."""
         cursor = self.conn.cursor()
-        query = "SELECT name, MAX(version) as latest_version, is_pure, expected_args, declared_at FROM functions"
+        query = (
+            "SELECT name, MAX(version) as latest_version, is_pure, "
+            "expected_args, description, arg_descriptions, declared_at FROM functions"
+        )
         if active_only:
             query += " WHERE retired_at IS NULL"
         query += " GROUP BY name"
@@ -708,10 +746,8 @@ class Curry:
         results = []
         for row in cursor.fetchall():
             d = dict(row)
-            if "expected_args" in d and d["expected_args"] is not None:
-                d["expected_args"] = json.loads(d["expected_args"])
-            else:
-                d["expected_args"] = None
+            d["expected_args"] = json.loads(d["expected_args"]) if d.get("expected_args") else None
+            d["arg_descriptions"] = json.loads(d["arg_descriptions"]) if d.get("arg_descriptions") else None
             results.append(d)
 
         if self.fallback_db:

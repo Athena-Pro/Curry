@@ -1003,6 +1003,67 @@ def test_two_tier_session():
             assert "local_var" in ids
 
 
+def test_function_description_fields():
+    """Test that description and arg_descriptions are stored and returned correctly."""
+    db = Curry()
+    db.declare_function(
+        name="priced_item",
+        version=1,
+        body="round(cost * (1 + margin), 2)",
+        expected_args=["cost", "margin"],
+        description="Compute selling price from cost and margin (markup_rate pattern).",
+        arg_descriptions={
+            "cost": "Wholesale cost in dollars (e.g. 80.00)",
+            "margin": "Margin as a decimal fraction (e.g. 0.20 for 20%, NOT 20)",
+        },
+    )
+
+    func = db.get_function("priced_item", 1)
+    assert func["description"] == "Compute selling price from cost and margin (markup_rate pattern)."
+    assert func["arg_descriptions"] is not None
+    assert func["arg_descriptions"]["margin"] == "Margin as a decimal fraction (e.g. 0.20 for 20%, NOT 20)"
+
+    listed = db.list_functions()
+    assert len(listed) == 1
+    assert listed[0]["description"] is not None
+    assert listed[0]["arg_descriptions"]["cost"] == "Wholesale cost in dollars (e.g. 80.00)"
+
+    # Round-trip: call the function to verify the body still works
+    result = db.call_function("priced_item", 1, {"cost": 100.0, "margin": 0.20})
+    assert result == 120.0
+
+    db.close()
+
+
+def test_arg_descriptions_surfaced_in_listing():
+    """Test None fallback when arg_descriptions is omitted (Lag Pattern 2 guard)."""
+    db = Curry()
+    # Function without arg_descriptions -- should surface None, not raise
+    db.declare_function(
+        name="simple",
+        version=1,
+        body="x + 1",
+        expected_args=["x"],
+    )
+    listed = db.list_functions()
+    assert listed[0]["arg_descriptions"] is None
+    assert listed[0]["description"] is None
+
+    # Function with partial arg_descriptions -- missing keys surface None via .get()
+    db.declare_function(
+        name="partial",
+        version=1,
+        body="a + b",
+        expected_args=["a", "b"],
+        arg_descriptions={"a": "The first operand"},  # 'b' intentionally omitted
+    )
+    func = db.get_function("partial", 1)
+    assert func["arg_descriptions"].get("a") == "The first operand"
+    assert func["arg_descriptions"].get("b") is None  # missing key returns None
+
+    db.close()
+
+
 def run_all_tests():
     """Run complete test suite."""
     print("\n" + "="*70)
@@ -1064,6 +1125,8 @@ def run_all_tests():
     runner.test("Validate function body unbound variable", test_validate_function_body_unbound_variable)
     runner.test("Backup database", test_backup_database)
     runner.test("Two-tier CurrySession architecture", test_two_tier_session)
+    runner.test("Function description and arg_descriptions stored and retrieved", test_function_description_fields)
+    runner.test("Dynamic tools use arg_descriptions for unit hints", test_arg_descriptions_surfaced_in_listing)
 
     runner.summary()
 

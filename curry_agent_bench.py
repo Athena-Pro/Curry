@@ -80,6 +80,7 @@ def build_fixture() -> Curry:
     """
     Create an in-memory Curry DB with a small but realistic set of functions.
     Covers single-arg, multi-arg, chained, and composed cases.
+    All functions include description and arg_descriptions for Lag Pattern 2 compliance.
     """
     db = Curry(":memory:")
 
@@ -97,6 +98,8 @@ def build_fixture() -> Curry:
         constant_bindings={"discount_rate": 1},
         expected_args=["amount"],
         is_pure=True,
+        description="Apply the standard 15% discount (discount_rate constant) to a gross amount.",
+        arg_descriptions={"amount": "Gross price in dollars (e.g. 250.00)"},
     )
 
     # compute_tax(amount) -> tax portion on an amount
@@ -107,6 +110,8 @@ def build_fixture() -> Curry:
         constant_bindings={"tax_rate": 1},
         expected_args=["amount"],
         is_pure=True,
+        description="Compute the tax amount (tax_rate constant, 8%) on a given price.",
+        arg_descriptions={"amount": "Price in dollars to compute tax on (e.g. 212.50)"},
     )
 
     # final_price(amount) -> discounted amount + tax
@@ -117,6 +122,8 @@ def build_fixture() -> Curry:
         constant_bindings={"discount_rate": 1, "tax_rate": 1},
         expected_args=["amount"],
         is_pure=True,
+        description="Compute final price after applying discount_rate then tax_rate. Single-step alternative to chaining apply_discount and compute_tax.",
+        arg_descriptions={"amount": "Original gross price in dollars (e.g. 450.00)"},
     )
 
     # apply_markup(cost) -> cost with markup
@@ -127,6 +134,8 @@ def build_fixture() -> Curry:
         constant_bindings={"markup_rate": 1},
         expected_args=["cost"],
         is_pure=True,
+        description="Apply the standard markup (markup_rate constant, 20%) to a wholesale cost to get selling price.",
+        arg_descriptions={"cost": "Wholesale cost in dollars (e.g. 80.00)"},
     )
 
     # meets_minimum(order_total) -> bool: does order meet minimum?
@@ -137,6 +146,8 @@ def build_fixture() -> Curry:
         constant_bindings={"min_order": 1},
         expected_args=["order_total"],
         is_pure=True,
+        description="Check whether an order total meets the minimum order threshold (min_order constant, $50). Returns True or False.",
+        arg_descriptions={"order_total": "Order total in dollars (e.g. 40.00)"},
     )
 
     # compound_interest(principal, rate, years) -> final value
@@ -147,6 +158,12 @@ def build_fixture() -> Curry:
         constant_bindings={},
         expected_args=["principal", "rate", "years"],
         is_pure=True,
+        description="Compute compound interest final value. Formula: principal * (1 + rate) ** years.",
+        arg_descriptions={
+            "principal": "Starting principal amount in dollars (e.g. 1000.00)",
+            "rate": "Annual interest rate as a decimal fraction (e.g. 0.06 for 6%, NOT 6)",
+            "years": "Investment duration in whole years (e.g. 5)",
+        },
     )
 
     return db
@@ -222,29 +239,33 @@ def build_generic_tools() -> List[Dict]:
 def build_dynamic_tools(db: Curry) -> List[Dict]:
     """
     DYNAMIC surface: each function gets its own named tool with a typed schema
-    derived from expected_args. No discovery needed -- the agent can call
-    apply_discount_v1(amount=150) directly.
+    derived from expected_args and arg_descriptions (Lag Pattern 2 fix).
+    Non-obvious arguments carry unit hints from arg_descriptions; without a
+    stored hint the fallback is a generic description which is insufficient for
+    args like 'rate' or 'years'.
     """
     tools = _base_tools()
     for func in db.list_functions():
-        name    = func["name"]
-        version = func["latest_version"]
-        args    = func.get("expected_args") or []
+        name        = func["name"]
+        version     = func["latest_version"]
+        args        = func.get("expected_args") or []
+        fn_desc     = func.get("description") or ""
+        fn_arg_desc = func.get("arg_descriptions") or {}
 
-        properties = {
-            arg: {
-                "type": "number",
-                "description": f"Value for argument '{arg}'",
-            }
-            for arg in args
-        }
+        tool_description = (
+            f"Call '{name}' (v{version})."
+            + (f" {fn_desc}" if fn_desc else "")
+            + (f" Args: {', '.join(args)}." if args else " No args.")
+        )
+
+        properties = {}
+        for arg in args:
+            hint = fn_arg_desc.get(arg) or f"Value for argument '{arg}'"
+            properties[arg] = {"type": "number", "description": hint}
 
         tools.append({
             "name": f"{name}_v{version}",
-            "description": (
-                f"Call the '{name}' function (version {version}). "
-                f"Arguments: {', '.join(args) if args else 'none'}."
-            ),
+            "description": tool_description,
             "input_schema": {
                 "type": "object",
                 "properties": properties,

@@ -123,7 +123,7 @@ def build_server(session: CurrySession) -> Server:
     # ── Tool listing ─────────────────────────────────────────────────────────
     @server.list_tools()
     async def list_tools() -> List[types.Tool]:
-        return [
+        static_tools = [
 
             # ── Constants ────────────────────────────────────────────────────
             types.Tool(
@@ -206,7 +206,10 @@ def build_server(session: CurrySession) -> Server:
                     "Declare a versioned function with a Python expression body. "
                     "The body is statically validated via AST at declaration time. "
                     "Provide expected_args to enable strict symbol validation and auto-generate "
-                    "MCP input schemas for call_function."
+                    "MCP input schemas for call_function. "
+                    "Provide description (human-readable summary including which constants are bound) "
+                    "and arg_descriptions (per-arg unit hints for non-obvious arguments) so that "
+                    "dynamic per-function tools are fully self-documenting."
                 ),
                 inputSchema={
                     "type": "object",
@@ -226,6 +229,17 @@ def build_server(session: CurrySession) -> Server:
                             "items": {"type": "string"},
                             "description": "Runtime argument names the caller must supply to call_function",
                         },
+                        "description": _str_prop(
+                            "Human-readable summary of what the function does and which constants "
+                            "it binds to. Used as the MCP tool description for the dynamic tool. "
+                            "Example: 'Apply the standard markup (markup_rate constant) to a wholesale cost.'"
+                        ),
+                        "arg_descriptions": _obj_prop(
+                            "Per-argument hint strings. Non-obvious args (rates, proportions, enums) "
+                            "MUST include a unit hint and example value. "
+                            "Example: {\"rate\": \"Annual rate as a decimal fraction (e.g. 0.06 for 6%)\", "
+                            "\"years\": \"Duration in whole years (e.g. 5)\"}"
+                        ),
                     },
                     "required": ["name", "version", "body"],
                 },
@@ -496,6 +510,50 @@ def build_server(session: CurrySession) -> Server:
             ),
         ]
 
+        # ── Dynamic per-function tools (Lag Pattern 2 fix) ─────────────────────
+        # Each Curry function declared with expected_args gets its own named
+        # tool so agents can call directly without a discovery round trip.
+        # arg_descriptions provides per-argument unit hints; without them the
+        # tool falls back to a generic 'Value for argument X' description which
+        # is insufficient for non-obvious args like rates or proportions.
+        try:
+            for func in session.list_functions():
+                fn_name     = func["name"]
+                fn_ver      = func["latest_version"]
+                fn_args     = func.get("expected_args") or []
+                fn_desc     = func.get("description") or ""
+                fn_arg_desc = func.get("arg_descriptions") or {}
+
+                tool_desc = (
+                    f"Call Curry function '{fn_name}' (v{fn_ver})."
+                    + (f" {fn_desc}" if fn_desc else "")
+                    + (f" Args: {', '.join(fn_args)}." if fn_args else " No args.")
+                )
+
+                properties = {}
+                for arg in fn_args:
+                    hint = fn_arg_desc.get(arg) or f"Value for argument '{arg}'"
+                    properties[arg] = {"type": "number", "description": hint}
+
+                static_tools.append(
+                    types.Tool(
+                        name=t(f"fn_{fn_name}_v{fn_ver}"),
+                        description=tool_desc,
+                        inputSchema={
+                            "type": "object",
+                            "properties": properties,
+                            "required": fn_args,
+                        },
+                    )
+                )
+        except Exception as dyn_exc:
+            print(
+                f"[curry-mcp] Warning: failed to build dynamic tools: {dyn_exc}",
+                file=sys.stderr,
+            )
+
+        return static_tools
+
     # ── Tool dispatch ─────────────────────────────────────────────────────────
     @server.call_tool()
     async def call_tool(
@@ -543,6 +601,8 @@ def build_server(session: CurrySession) -> Server:
                     function_bindings=arguments.get("function_bindings"),
                     is_pure=arguments.get("is_pure", False),
                     expected_args=arguments.get("expected_args"),
+                    description=arguments.get("description"),
+                    arg_descriptions=arguments.get("arg_descriptions"),
                 )
                 return _ok({"status": "declared", "name": arguments["name"], "version": arguments["version"]})
 
@@ -664,6 +724,19 @@ def build_server(session: CurrySession) -> Server:
                         "core_db": session.core_db.integrity_check(),
                     }
                 )
+
+            # ── Dynamic per-function dispatch ────────────────────────────────
+            # Tool name format: {prefix}_fn_{func_name}_v{version}
+            if bare.startswith("fn_"):
+                inner = bare[3:]  # strip "fn_"
+                if "_v" in inner:
+                    fn_name, fn_ver_str = inner.rsplit("_v", 1)
+                    try:
+                        fn_ver = int(fn_ver_str)
+                        result = session.call_function(fn_name, fn_ver, arguments)
+                        return _ok({"function": f"{fn_name}@v{fn_ver}", "result": result})
+                    except (ValueError, KeyError, RuntimeError) as exc:
+                        return _err(exc)
 
             return _err(ValueError(f"Unknown tool: {name}"))
 
