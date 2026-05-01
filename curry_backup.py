@@ -30,11 +30,11 @@ def main():
     db_name = os.path.basename(args.db_path)
     if not db_name.endswith('.db'):
         db_name += '.db'
-    
+
     basename = os.path.splitext(db_name)[0]
     if basename == ":memory:":
         basename = "memory"
-        
+
     backup_file = os.path.join(args.backup_dir, f"{basename}_backup_{timestamp}.db")
 
     print(f"Starting backup of {args.db_path} to {backup_file}...")
