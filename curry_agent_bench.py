@@ -29,7 +29,9 @@ Output:
 
 import argparse
 import json
+import math
 import os
+import statistics
 import sys
 import time
 from copy import deepcopy
@@ -44,6 +46,25 @@ except ImportError:
 
 sys.path.insert(0, os.path.dirname(__file__))
 from curry_core import Curry
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pricing (USD per million tokens, May 2026)
+# ─────────────────────────────────────────────────────────────────────────────
+
+PRICING: Dict[str, Dict[str, float]] = {
+    "claude-haiku-4-5-20251001":  {"input": 0.80,  "output": 4.00},
+    "claude-haiku-4-5":           {"input": 0.80,  "output": 4.00},
+    "claude-sonnet-4-5-20251001": {"input": 3.00,  "output": 15.00},
+    "claude-sonnet-4-5":          {"input": 3.00,  "output": 15.00},
+    "claude-sonnet-4-6":          {"input": 3.00,  "output": 15.00},
+    "claude-opus-4-5":            {"input": 15.00, "output": 75.00},
+}
+
+def _price(model: str, input_tokens: float, output_tokens: float) -> float:
+    """Estimated USD cost for a given token count at model list pricing."""
+    rates = PRICING.get(model, {"input": 3.00, "output": 15.00})
+    return (input_tokens * rates["input"] + output_tokens * rates["output"]) / 1_000_000
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -301,8 +322,37 @@ def execute_tool(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Benchmark task definitions
+# Schema overhead measurement
 # ─────────────────────────────────────────────────────────────────────────────
+
+def measure_schema_overhead(
+    client: anthropic.Anthropic,
+    tools: List[Dict],
+    model: str,
+    system: str,
+) -> int:
+    """
+    Count input tokens consumed by the tool definitions + system prompt alone,
+    before any conversation history.  Uses client.messages.count_tokens() so no
+    inference cost is incurred.
+
+    Returns the token count, or -1 if the API does not support count_tokens.
+    The single-word user message ("x") is intentional -- it gives a clean
+    baseline for fixed overhead independent of task prompt length.
+    """
+    try:
+        resp = client.messages.count_tokens(
+            model=model,
+            system=system,
+            tools=tools,          # type: ignore[arg-type]
+            messages=[{"role": "user", "content": "x"}],
+        )
+        return resp.input_tokens
+    except Exception:
+        return -1
+
+
+
 
 TASKS = [
     {
@@ -537,23 +587,82 @@ def _avg(vals: List[float]) -> float:
     return sum(vals) / len(vals) if vals else 0.0
 
 
-def print_summary(results: List[RunResult]) -> None:
-    """Print a compact comparison table to stdout."""
+def print_summary(
+    results: List[RunResult],
+    schema_overheads: Optional[Dict[str, int]] = None,
+    model: str = "",
+) -> None:
+    """
+    Print a rigorous comparison table.
+
+    schema_overheads -- {"generic": N, "dynamic": N} from measure_schema_overhead().
+                        Pass None to skip that section.
+    model            -- used for cost estimation; falls back to PRICING default if unknown.
+    """
 
     def group(mode: str) -> List[RunResult]:
         return [r for r in results if r.mode == mode]
 
-    generic = group("generic")
-    dynamic = group("dynamic")
+    def _std(vals: List[float]) -> float:
+        return statistics.stdev(vals) if len(vals) >= 2 else 0.0
 
-    # Per-task table
-    print("\n" + "=" * 90)
+    def _pct(a: float, b: float) -> str:
+        return f"({(b / a - 1) * 100:+.1f}%)" if a > 0 else "(n/a)"
+
+    generic  = group("generic")
+    dynamic  = group("dynamic")
+    n_runs   = max(len({r.task_id for r in generic}), 1)
+    multi    = any(
+        sum(1 for r in results if r.task_id == tid and r.mode == "generic") > 1
+        for tid in {r.task_id for r in results}
+    )
+
+    W = 100
+
+    # ── Header ────────────────────────────────────────────────────────────────
+    print("\n" + "=" * W)
     print("CURRY AGENT BENCHMARK  --  Generic call_function  vs  Dynamic per-function tools")
-    print("=" * 90)
+    if model:
+        print(f"Model: {model}  |  Runs per task/mode: {max(1, len(generic) // max(1, n_runs))}")
+    print("=" * W)
 
-    header = f"{'Task':<24} {'Mode':<9} {'Turns':>5} {'ToolCalls':>9} {'Disc':>5} {'FnCalls':>8} {'Tokens':>7} {'1stFn':>5} {'Done':>5}"
-    print(header)
-    print("-" * 90)
+    # ── Schema overhead ───────────────────────────────────────────────────────
+    if schema_overheads and any(v > 0 for v in schema_overheads.values()):
+        g_sch = schema_overheads.get("generic", -1)
+        d_sch = schema_overheads.get("dynamic", -1)
+        print("\nSCHEMA OVERHEAD  (tool definitions + system prompt, zero-history baseline)")
+        print("-" * 60)
+        if g_sch > 0:
+            g_cost = _price(model, g_sch, 0)
+            print(f"  generic   : {g_sch:>6,} tokens   (${g_cost * 1000:.4f} per 1k calls)")
+        if d_sch > 0:
+            d_cost = _price(model, d_sch, 0)
+            print(f"  dynamic   : {d_sch:>6,} tokens   (${d_cost * 1000:.4f} per 1k calls)")
+        if g_sch > 0 and d_sch > 0:
+            delta = d_sch - g_sch
+            pct   = (delta / g_sch) * 100
+            print(f"  delta     : {delta:>+6,} tokens   ({pct:+.1f}%  larger tool surface in dynamic mode)")
+            # Break-even: extra schema cost amortized over token savings per task
+            g_avg_tok = _avg([r.total_tokens for r in generic]) if generic else 0
+            d_avg_tok = _avg([r.total_tokens for r in dynamic]) if dynamic else 0
+            task_savings = g_avg_tok - d_avg_tok
+            if task_savings > 0:
+                breakeven = delta / task_savings
+                print(f"  break-even: schema overhead recovered after {breakeven:.1f} tasks "
+                      f"(dynamic saves ~{task_savings:.0f} tok/task on average)")
+
+    # ── Per-task token breakdown ──────────────────────────────────────────────
+    print("\nPER-TASK TOKEN BREAKDOWN  (input | output | total | est. cost USD)")
+    print("-" * W)
+    hdr = (f"{'Task':<24} {'Mode':<9} {'Turns':>5}  "
+           f"{'In':>7}  {'Out':>6}  {'Total':>7}  {'Cost$':>8}  "
+           f"{'1stFn':>5}  {'Done':>4}")
+    if multi:
+        hdr = (f"{'Task':<24} {'Mode':<9} {'Turns':>5}  "
+               f"{'In(mean±σ)':>14}  {'Out(mean±σ)':>13}  {'Total':>7}  "
+               f"{'Cost$':>8}  {'1stFn':>5}  {'Done':>4}")
+    print(hdr)
+    print("-" * W)
 
     task_ids = sorted({r.task_id for r in results})
     for tid in task_ids:
@@ -561,52 +670,88 @@ def print_summary(results: List[RunResult]) -> None:
             runs = [r for r in results if r.task_id == tid and r.mode == mode]
             if not runs:
                 continue
-            avg_turns     = _avg([r.turns for r in runs])
-            avg_tc        = _avg([r.tool_calls for r in runs])
-            avg_disc      = _avg([r.discovery_calls for r in runs])
-            avg_fn        = _avg([r.function_calls for r in runs])
-            avg_tok       = _avg([r.total_tokens for r in runs])
-            first_fn_rate = sum(1 for r in runs if r.first_call_to_function) / len(runs)
-            done_rate     = sum(1 for r in runs if r.completed) / len(runs)
-            print(
-                f"{tid:<24} {mode:<9} {avg_turns:>5.1f} {avg_tc:>9.1f} "
-                f"{avg_disc:>5.1f} {avg_fn:>8.1f} {avg_tok:>7.0f} "
-                f"{first_fn_rate:>4.0%}  {done_rate:>4.0%}"
-            )
+            avg_turns = _avg([r.turns for r in runs])
+            avg_in    = _avg([r.input_tokens  for r in runs])
+            avg_out   = _avg([r.output_tokens for r in runs])
+            avg_tot   = _avg([r.total_tokens  for r in runs])
+            std_in    = _std([r.input_tokens  for r in runs])
+            std_out   = _std([r.output_tokens for r in runs])
+            cost      = _price(model, avg_in, avg_out)
+            first_fn  = sum(1 for r in runs if r.first_call_to_function) / len(runs)
+            done      = sum(1 for r in runs if r.completed) / len(runs)
+
+            if multi:
+                in_col  = f"{avg_in:>7.0f}±{std_in:>5.0f}"
+                out_col = f"{avg_out:>6.0f}±{std_out:>5.0f}"
+                print(f"{tid:<24} {mode:<9} {avg_turns:>5.1f}  "
+                      f"{in_col:>14}  {out_col:>13}  {avg_tot:>7.0f}  "
+                      f"${cost:>7.5f}  {first_fn:>4.0%}   {done:>3.0%}")
+            else:
+                print(f"{tid:<24} {mode:<9} {avg_turns:>5.1f}  "
+                      f"{avg_in:>7.0f}  {avg_out:>6.0f}  {avg_tot:>7.0f}  "
+                      f"${cost:>7.5f}  {first_fn:>4.0%}   {done:>3.0%}")
         print()
 
-    # Aggregate comparison
-    print("=" * 90)
-    print("AGGREGATE AVERAGES")
-    print("-" * 50)
+    # ── Aggregate comparison ──────────────────────────────────────────────────
+    print("=" * W)
+    print("AGGREGATE AVERAGES  (all tasks, all runs)")
+    print("-" * 60)
     for mode, runs in [("generic", generic), ("dynamic", dynamic)]:
         if not runs:
             continue
-        print(f"  {mode.upper()}")
-        print(f"    Turns per task       {_avg([r.turns for r in runs]):.2f}")
-        print(f"    Tool calls per task  {_avg([r.tool_calls for r in runs]):.2f}")
-        print(f"    Discovery calls      {_avg([r.discovery_calls for r in runs]):.2f}")
-        print(f"    Function calls       {_avg([r.function_calls for r in runs]):.2f}")
-        print(f"    Total tokens         {_avg([r.total_tokens for r in runs]):.0f}")
+        in_vals  = [r.input_tokens  for r in runs]
+        out_vals = [r.output_tokens for r in runs]
+        tot_vals = [r.total_tokens  for r in runs]
+        trn_vals = [r.turns         for r in runs]
+        disc_vals = [r.discovery_calls for r in runs]
+
+        avg_in  = _avg(in_vals);  std_in  = _std(in_vals)
+        avg_out = _avg(out_vals); std_out = _std(out_vals)
+        avg_tot = _avg(tot_vals); std_tot = _std(tot_vals)
+        avg_trn = _avg(trn_vals); std_trn = _std(trn_vals)
+        avg_cost = _price(model, avg_in, avg_out)
+
+        print(f"\n  {mode.upper()}")
+        print(f"    Turns per task       {avg_trn:.2f}" + (f"  ±{std_trn:.2f}" if multi else ""))
+        print(f"    Discovery calls      {_avg(disc_vals):.2f}" + (f"  ±{_std(disc_vals):.2f}" if multi else ""))
+        print(f"    Input tokens/task    {avg_in:.0f}" + (f"  ±{std_in:.0f}" if multi else ""))
+        print(f"    Output tokens/task   {avg_out:.0f}" + (f"  ±{std_out:.0f}" if multi else ""))
+        print(f"    Total tokens/task    {avg_tot:.0f}" + (f"  ±{std_tot:.0f}" if multi else ""))
+        print(f"    Est. cost/task       ${avg_cost:.6f}")
+        if len(runs) > 0:
+            rates = PRICING.get(model, {"input": 3.00, "output": 15.00})
+            print(f"    Output/Input ratio   {avg_out/avg_in:.3f}  "
+                  f"(output costs {rates['output']/rates['input']:.1f}x more per token)")
         print(f"    First call to fn     {sum(1 for r in runs if r.first_call_to_function)/len(runs):.0%}")
         print(f"    Completion rate      {sum(1 for r in runs if r.completed)/len(runs):.0%}")
-        print()
 
-    # Delta row
+    # ── Delta ─────────────────────────────────────────────────────────────────
     if generic and dynamic:
-        g_turns  = _avg([r.turns        for r in generic])
-        d_turns  = _avg([r.turns        for r in dynamic])
-        g_tokens = _avg([r.total_tokens for r in generic])
-        d_tokens = _avg([r.total_tokens for r in dynamic])
-        g_disc   = _avg([r.discovery_calls for r in generic])
-        d_disc   = _avg([r.discovery_calls for r in dynamic])
-        turns_pct  = f"({(d_turns/g_turns - 1)*100:+.1f}%)"  if g_turns  > 0 else "(n/a)"
-        tokens_pct = f"({(d_tokens/g_tokens - 1)*100:+.1f}%)" if g_tokens > 0 else "(n/a)"
+        g_in   = _avg([r.input_tokens  for r in generic])
+        d_in   = _avg([r.input_tokens  for r in dynamic])
+        g_out  = _avg([r.output_tokens for r in generic])
+        d_out  = _avg([r.output_tokens for r in dynamic])
+        g_tot  = _avg([r.total_tokens  for r in generic])
+        d_tot  = _avg([r.total_tokens  for r in dynamic])
+        g_trn  = _avg([r.turns         for r in generic])
+        d_trn  = _avg([r.turns         for r in dynamic])
+        g_disc = _avg([r.discovery_calls for r in generic])
+        d_disc = _avg([r.discovery_calls for r in dynamic])
+        g_cost = _price(model, g_in, g_out)
+        d_cost = _price(model, d_in, d_out)
+
+        print(f"\n{'=' * W}")
         print("DYNAMIC vs GENERIC DELTA")
-        print(f"    Turns saved          {g_turns - d_turns:+.2f}  {turns_pct}")
-        print(f"    Tokens saved         {g_tokens - d_tokens:+.0f}  {tokens_pct}")
+        print(f"-" * 60)
+        print(f"    Turns saved          {g_trn - d_trn:+.2f}  {_pct(g_trn,  d_trn)}")
+        print(f"    Input tokens saved   {g_in  - d_in:+.0f}  {_pct(g_in,   d_in)}")
+        print(f"    Output tokens saved  {g_out - d_out:+.0f}  {_pct(g_out,  d_out)}")
+        print(f"    Total tokens saved   {g_tot - d_tot:+.0f}  {_pct(g_tot,  d_tot)}")
+        print(f"    Cost saved/task      ${g_cost - d_cost:+.6f}  {_pct(g_cost, d_cost)}")
         print(f"    Discovery calls saved {g_disc - d_disc:+.2f}")
-    print("=" * 90)
+
+    print("=" * W)
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -625,11 +770,16 @@ def main():
     )
     parser.add_argument(
         "--runs", type=int, default=1,
-        help="Repetitions per task/mode pair for averaging (default: 1)"
+        help="Repetitions per task/mode pair for averaging (default: 1). "
+             "Use >= 3 for statistically meaningful std dev."
     )
     parser.add_argument(
         "--output", default="curry_bench_results.json",
         help="Path for raw JSON results (default: curry_bench_results.json)"
+    )
+    parser.add_argument(
+        "--no-schema-check", dest="no_schema_check", action="store_true",
+        help="Skip the count_tokens schema overhead measurement."
     )
     args = parser.parse_args()
 
@@ -641,8 +791,31 @@ def main():
     client = anthropic.Anthropic(api_key=api_key)
     db     = build_fixture()
 
+    system = (
+        "You are an agent with access to Curry, a deterministic functional database. "
+        "Complete the user's request using the available tools. "
+        "Be efficient -- use the minimum number of tool calls necessary. "
+        "Return a concise final answer when done."
+    )
+
     generic_tools = build_generic_tools()
     dynamic_tools = build_dynamic_tools(db)
+
+    # ── Schema overhead measurement (no inference cost) ───────────────────────
+    schema_overheads: Dict[str, int] = {}
+    if not args.no_schema_check:
+        print("\nMeasuring schema overhead via count_tokens (no inference cost)...", end="", flush=True)
+        schema_overheads["generic"] = measure_schema_overhead(client, generic_tools, args.model, system)
+        schema_overheads["dynamic"] = measure_schema_overhead(client, dynamic_tools, args.model, system)
+        if all(v > 0 for v in schema_overheads.values()):
+            print(
+                f"  generic={schema_overheads['generic']:,}  "
+                f"dynamic={schema_overheads['dynamic']:,}  "
+                f"delta={schema_overheads['dynamic'] - schema_overheads['generic']:+,}"
+            )
+        else:
+            print("  (count_tokens not supported for this model, skipping)")
+            schema_overheads = {}
 
     task_ids = args.tasks or [t["id"] for t in TASKS]
     tasks    = [TASK_MAP[tid] for tid in task_ids if tid in TASK_MAP]
@@ -651,6 +824,8 @@ def main():
         sys.exit(1)
 
     print(f"\nBenchmark: {args.model}  |  {len(tasks)} tasks  |  {args.runs} run(s) each  |  2 modes")
+    if args.runs == 1:
+        print("  Tip: use --runs 3 (or more) for std dev and statistical confidence.")
     print(f"Generic tools  : {len(generic_tools)}")
     print(f"Dynamic tools  : {len(dynamic_tools)}  (includes {len(dynamic_tools) - 3} per-function tools)")
     print()
@@ -669,7 +844,7 @@ def main():
                 status = "OK" if result.completed else f"FAIL({result.error})"
                 print(
                     f"  turns={result.turns}  tools={result.tool_calls}  "
-                    f"disc={result.discovery_calls}  tokens={result.total_tokens}  {status}"
+                    f"in={result.input_tokens}  out={result.output_tokens}  {status}"
                 )
 
     # Save raw results
@@ -678,8 +853,9 @@ def main():
         json.dump(raw, f, indent=2)
     print(f"\nRaw results saved to: {args.output}")
 
-    print_summary(all_results)
+    print_summary(all_results, schema_overheads=schema_overheads or None, model=args.model)
 
 
 if __name__ == "__main__":
     main()
+

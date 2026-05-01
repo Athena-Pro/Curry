@@ -165,15 +165,19 @@ class ClaudeAdapter(LLMAdapter):
         start_time = time.time()
         
         try:
-            # Call Claude API
+            # Claude API rejects requests with both temperature and top_p set.
+            # Prefer temperature when present; fall back to top_p.
+            extra_params = {}
+            if model_config.get("temperature") is not None:
+                extra_params["temperature"] = model_config["temperature"]
+            elif model_config.get("top_p") is not None:
+                extra_params["top_p"] = model_config["top_p"]
+
             response = self.client.messages.create(
                 model=model_name,
                 max_tokens=model_config["max_tokens"],
-                temperature=model_config["temperature"],
-                top_p=model_config["top_p"],
-                messages=[
-                    {"role": "user", "content": prompt}
-                ],
+                messages=[{"role": "user", "content": prompt}],
+                **extra_params,
             )
             
             output_text = response.content[0].text

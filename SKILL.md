@@ -40,6 +40,7 @@ When editing adapters:
 - Verify SDK usage against official provider docs before changing call shapes.
 - Keep adapter failures descriptive and surface provider errors unchanged where practical.
 - Avoid introducing provider-specific defaults that override Curry's stored model parameters.
+- **Claude API**: `temperature` and `top_p` are mutually exclusive. Never pass both. Prefer `temperature` when the model record has it set; fall back to `top_p` only when `temperature` is `None`.
 
 When editing examples or tests:
 
@@ -191,7 +192,7 @@ All items from prior Code Review Notes and the May 2026 audit are resolved. This
 ### Resolved: Bugs / Silent Failures
 - `retire_constant()` and `retire_function()` raise `KeyError` on missing entities.
 - `declare_function()` and `register_model()` enforce monotonic version ordering.
-- `ClaudeAdapter.infer()` passes `top_p` to `client.messages.create()`.
+- `ClaudeAdapter.infer()` passes only one of `temperature` or `top_p` to `client.messages.create()`. Claude models (claude-sonnet-4-6 and later) reject requests that supply both; the adapter prefers `temperature` when set, falls back to `top_p` otherwise.
 - `_deserialize_constant_value()` re-validates type after deserialization.
 
 ### Resolved: Design Gaps
@@ -237,6 +238,24 @@ Treat REU as **Request -> Execute -> Update**. Every call path satisfies all thr
 - **Update**: Persist inference record atomically after successful execution. Ensure metadata is JSON-serializable. Return durable identifiers only (`inference_id`) once commit succeeds.
 
 Minimum REU reliability tests: success path writes exactly one inference row with complete metadata; failure path raises `RuntimeError` and writes no partial row; retryable failures obey max retry count; non-serializable metadata raises `TypeError` before write.
+
+---
+
+## Agent Benchmark: Dynamic vs Generic Tool Surface (May 2026)
+
+Validated with `curry_agent_bench.py` on `claude-haiku-4-5-20251001`, 6 tasks, 1 run each.
+
+| Metric | Generic | Dynamic | Delta |
+|---|---|---|---|
+| Turns per task | 3.17 | 2.17 | **-1.0 (-32%)** |
+| Tokens per task | 4,289 | 3,119 | **-1,169 (-27%)** |
+| Discovery calls | 1.17 | 0.00 | **eliminated** |
+| First call to function | 0% | 100% | agent goes direct every time |
+| Completion rate | 100% | 100% | both modes reliable |
+
+**Why it matters**: The generic surface requires the agent to call `list_functions` first to discover argument names before it can call `call_function`. Dynamic per-function tools (named `{fn}_v{version}` with typed schemas derived from `expected_args`) eliminate that discovery turn entirely. The agent knows what to call and how from the tool schema alone.
+
+**Design rule**: When implementing MCP tools for user-facing agents, always generate per-function dynamic tools from `expected_args`. The generic `call_function` dispatcher is appropriate for programmatic/scripted callers, not for agent tool surfaces.
 
 ---
 
