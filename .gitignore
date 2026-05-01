@@ -23,3 +23,9 @@ backups/
 .DS_Store
 Thumbs.db
 
+# Project planning (deleted from repo)
+CURRY_PROJECT_SPEC.md
+
+# Benchmark result snapshots (local only)
+curry_bench_results.json
+
