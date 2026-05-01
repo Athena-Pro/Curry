@@ -226,6 +226,9 @@ All items from prior Code Review Notes and the May 2026 audit are resolved. This
 - `export_schema()` -- include indices, views, triggers in output.
 - `TOKENS` list element validation -- `all(isinstance(t, int) for t in value)`.
 - `CURRENCY` string format validation -- document and enforce expected shape.
+- `declare_function()` `description` parameter -- store in `functions` table, surface in `get_function()` / `list_functions()`, and use in dynamic MCP schema generation for per-function tool descriptions and argument unit hints (see Lag Pattern 2).
+- `build_dynamic_tools()` argument hint generation -- derive unit/range hints from stored `description` field; fall back to `"Value for argument '{arg}'"` only when no description is present; flag missing descriptions on non-obvious args as a schema warning at generation time.
+- Benchmark correctness scoring -- add `expected_answer` field to `TASKS` and a `correct` bool to `RunResult`; update `print_summary()` to report correctness rate alongside completion rate.
 
 ---
 
@@ -259,6 +262,84 @@ Validated with `curry_agent_bench.py` on `claude-haiku-4-5-20251001`, 6 tasks, 1
 
 ---
 
+## Agent Benchmark: Lag Pattern Analysis and Rule Refinements (3-Run Extension, 2026)
+
+Follow-up to the May 2026 single-run benchmark. Same model (`claude-haiku-4-5-20251001`), same 6 tasks, 3 runs per task/mode pair (36 total). Raw data in `curry_bench_results.json`.
+
+### Updated Aggregate Results
+
+| Metric | Generic | Dynamic | Delta |
+|---|---|---|---|
+| Turns per task | 2.94 ±0.54 | 2.22 ±0.43 | **-0.72 (-24.5%)** |
+| Input tokens/task | 3,722 | 3,069 | **-653 (-17.5%)** |
+| Output tokens/task | 294 | 155 | **-139 (-47.3%)** |
+| Total tokens/task | 4,015 | 3,224 | **-792 (-19.7%)** |
+| Cost/task | $0.004152 | $0.003074 | **-$0.001078 (-26.0%)** |
+| Discovery calls | 1.22 | 0.06 | **near-eliminated** |
+| First call to function | 0% | 100% | unchanged |
+| Completion rate | 100% | 100% | unchanged |
+
+Schema overhead: generic=906 tokens, dynamic=1,255 tokens (+349, +38.5%). Break-even: 0.4 tasks — overhead recovers almost immediately.
+
+Note: deltas are lower than the 1-run figures above because the 3-run set captured variance the single run missed, particularly the `sequential_two` failure mode in generic and the `single_multiarg` regression in dynamic. Single-run figures should be treated as optimistic; 3-run figures are the working baseline.
+
+---
+
+### Lag Pattern 1 — Sequential Multi-Call Token Inversion
+
+**Observation:** For tasks requiring N≥2 *sequential* function calls (`sequential_two`), dynamic mode's per-turn input cost can exceed generic mode's. In run 1, dynamic used 4,195 input tokens vs. generic's 4,123 — the only run in 36 where generic was cheaper. Dynamic carries its full tool schema (+349 tokens) into every turn's context window. Generic pays a fixed discovery cost once, then accumulates only function response payloads.
+
+**Rule:** Declare composed Curry functions for every recurring sequential pipeline. `final_price` (discount + tax in one call) costs half the turns of the two-step `apply_discount` → `compute_tax` approach and eliminates the per-turn schema carry cost entirely. Sequential function chains that appear more than once in agent workflows are a signal to compose them as a named function version.
+
+---
+
+### Lag Pattern 2 — Dynamic Argument Unit Ambiguity
+
+**Observation:** `single_multiarg` dynamic run 3 called `compound_interest_v1(rate=6)` instead of `rate=0.06`, receiving `16,807,000` (wrong). The agent then called `session_info` (irrelevant) and produced a wrong final answer — unrecovered. The generic agent received the same wrong result but self-corrected by reasoning from the function body it had seen via `list_functions`. The dynamic agent never sees the function body; its tool description was `"Value for argument 'rate'"` with no unit hint.
+
+**Rules:**
+- When generating dynamic tool schemas from `expected_args`, the property `description` field for any argument whose unit is non-obvious from the name alone (rates, proportions, fractions, scaled values, enumerated flags) **must** include a unit hint and an example value. Use the form: `"Annual rate as a decimal fraction (e.g. 0.06 for 6%)"`, not `"Value for argument 'rate'"`.
+- Add a `description` field to `declare_function()` and store it in the `functions` table. Surface it in `get_function()`, `list_functions()`, and dynamic schema generation. Do not rely on function name and body alone to communicate expected argument conventions to an agent.
+- This is a schema defect, not a model failure. A missing unit hint on a non-obvious argument is treated the same as a missing required field: the declaration is incomplete.
+
+---
+
+### Lag Pattern 3 — Generic Tool Bypass (Hallucination Risk)
+
+**Observation:** `sequential_two` generic run 2 made zero tool calls and returned a non-answer asking the user for discount and tax rates — values discoverable via `list_constants`. The model concluded the task was under-specified without checking its tools. This spent 935 tokens doing nothing. This failure mode does not exist in dynamic mode: the function names alone make the tool surface self-evidently applicable.
+
+**Rule:** The system prompt for any agent operating on the generic tool surface must include an explicit tool-use directive: *"You MUST call available tools to answer. Do not attempt to calculate from memory or ask for information that may be discoverable via `list_functions` or `list_constants`."* Do not rely on the model inferring that relevant information is retrievable — state it.
+
+---
+
+### Lag Pattern 4 — Double-Discovery Compounding
+
+**Observation:** Tasks where the prompt references implicit named rates or thresholds (`sequential_two`, `discovery_ambiguous`) triggered two discovery calls — both `list_constants` and `list_functions` — in every valid generic run. The marginal cost of the second discovery call is ~+364 tokens. This is 5× the cost of two extra function calls (+70 tokens). Discovery call count scales with semantic ambiguity, not function call count. Dynamic mode is immune: both schemas are pre-loaded.
+
+**Rules:**
+- Function `description` fields (Lag Pattern 2 rule) should embed the names of the constants they bind to. Example: `"Apply the standard markup (markup_rate constant) to cost"` vs. `"Apply markup to cost"`. This reduces the double-discovery rate in generic mode by making the constant relationship explicit in the function listing.
+- Treat any benchmark task that consistently requires ≥2 discovery calls as a signal that function names and descriptions are insufficiently self-documenting. Refine before expanding the function set.
+- When a task mentions a named threshold or rate by human label ("standard markup", "minimum order"), treat it as a constant-binding hint in documentation, not an opaque implementation detail.
+
+---
+
+### Lag Pattern 5 — Non-Deterministic Discovery Call Ordering (Latent)
+
+**Observation:** For `discovery_ambiguous`, the agent called `list_constants` before `list_functions` in 2/3 generic runs and reversed the order in 1/3. Currently benign — both orderings succeed at equal token cost. But in tasks where the second discovery call's target cannot be determined without the first response, this 2:1 ordering split could produce different correctness outcomes across runs.
+
+**Rule:** When adding tasks to the benchmark or designing agent workflows over the generic surface, flag any task where discovery call ordering is semantically constrained (i.e., the correct second discovery call cannot be determined without the first response). These require either a composed dynamic schema (eliminating the ordering dependency) or a scaffolded prompt that specifies discovery order. Non-deterministic ordering on critical tasks is a latency and correctness risk, even when current task set results are stable.
+
+---
+
+### Benchmark Design Rules (derived from 3-run data)
+
+- Use `--runs 3` minimum for any benchmark run intended to inform design decisions. Single-run results suppress failure modes that appear at ~33% frequency (bypass, argument error).
+- The `first_call_to_function` metric is a perfect binary discriminator of mode across all 36 runs; retain it in all future benchmark runs.
+- Add a `correct_answer` field to task definitions and a correctness check to `RunResult`. Token efficiency without answer correctness is not a valid efficiency metric — `sequential_two` generic run 2 was the "cheapest" run in the benchmark and produced zero useful output.
+- When a dynamic run's total tokens exceed the generic average for the same task, file it as a regression case and inspect the tool call trace for recovery loops (`session_info` calls, repeated function calls with same args).
+
+---
+
 ## MCP Server Rules (Invariants)
 
 Enforce these before adding any new MCP tool:
@@ -266,6 +347,7 @@ Enforce these before adding any new MCP tool:
 - All tools route through `CurrySession`, never directly against `core_db` for writes.
 - Tool names use `config["mcp_tool_prefix"]` to avoid cross-project collision.
 - Input schema for `call_function` tools derives from `get_function()["expected_args"]` -- do not hardcode schemas.
+- Dynamic tool property descriptions must include unit and range hints for any argument whose expected domain is non-obvious from the name alone (rates, proportions, fractions, scaled values). A description of `"Value for argument 'rate'"` without a unit hint is a schema defect. Derive hints from the stored function `description` field once implemented; until then, annotate manually in `build_dynamic_tools()`.
 - Tool errors surface Curry typed exceptions (`KeyError`, `ValueError`, `PermissionError`, `RuntimeError`) as structured MCP error responses, not raw tracebacks.
 - Inference-writing tools always return `inference_id` as the durable result, never raw output text.
 - No MCP tool exposes `register_model`, `retire_model`, or any direct core write.
