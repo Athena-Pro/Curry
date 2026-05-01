@@ -31,6 +31,7 @@ import argparse
 import json
 import math # noqa: F401
 import os
+import re
 import statistics
 import sys
 import time
@@ -39,10 +40,14 @@ from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional
 
 try:
+    import requests as _requests
+except ImportError:
+    _requests = None  # type: ignore[assignment]
+
+try:
     import anthropic
 except ImportError:
-    print("anthropic package not found. Run: pip install anthropic", file=sys.stderr)
-    sys.exit(1)
+    anthropic = None  # type: ignore[assignment]
 
 sys.path.insert(0, os.path.dirname(__file__))
 from curry_core import Curry
@@ -352,6 +357,63 @@ def measure_schema_overhead(
         return -1
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Provider-agnostic helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _to_ollama_tools(tools: List[Dict]) -> List[Dict]:
+    """Convert Anthropic tool schema format to Ollama/OpenAI function-calling format.
+
+    Anthropic:  {"name": ..., "description": ..., "input_schema": {"type": "object", ...}}
+    Ollama:     {"type": "function", "function": {"name": ..., "description": ...,
+                    "parameters": {"type": "object", ...}}}
+    """
+    result = []
+    for t in tools:
+        schema = t.get("input_schema", {})
+        result.append({
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": t.get("description", ""),
+                "parameters": {
+                    "type": schema.get("type", "object"),
+                    "properties": schema.get("properties", {}),
+                    "required": schema.get("required", []),
+                },
+            },
+        })
+    return result
+
+
+def check_correctness(answer: str, expected_values: List) -> bool:
+    """Return True if *answer* contains all expected values.
+
+    - Numeric values (int/float): accepted if the answer contains a number
+      within ±0.01 of the expected value.
+    - String values (e.g. "false", "true"): checked case-insensitively as a
+      substring of the answer.
+    """
+    answer_lower = answer.lower()
+    nums_in_answer: List[float] = []
+    for m in re.finditer(r"-?\d+(?:\.\d+)?", answer):
+        try:
+            nums_in_answer.append(float(m.group()))
+        except ValueError:
+            pass
+
+    for ev in expected_values:
+        if isinstance(ev, bool):
+            needle = "true" if ev else "false"
+            if needle not in answer_lower:
+                return False
+        elif isinstance(ev, (int, float)):
+            if not any(abs(n - float(ev)) <= 0.01 for n in nums_in_answer):
+                return False
+        elif isinstance(ev, str):
+            if ev.lower() not in answer_lower:
+                return False
+    return True
 
 
 TASKS = [
@@ -362,6 +424,8 @@ TASKS = [
             "Use the apply_discount function and return only the final dollar amount."
         ),
         "hint": "Direct single-function call. Generic must discover args first.",
+        # apply_discount(250) = round(250 * (1 - 0.15), 2) = 212.5
+        "expected_values": [212.5],
     },
     {
         "id": "single_multiarg",
@@ -370,6 +434,8 @@ TASKS = [
             "at 6% annual rate over 5 years? Return the numeric result only."
         ),
         "hint": "Multi-arg function. Dynamic tool schema makes args unambiguous.",
+        # compound_interest(1000, 0.06, 5) = round(1000 * 1.06**5, 2) = 1338.23
+        "expected_values": [1338.23],
     },
     {
         "id": "sequential_two",
@@ -378,6 +444,8 @@ TASKS = [
             "on the discounted price. Return both intermediate values and the tax amount."
         ),
         "hint": "Two sequential function calls. Tests chaining efficiency.",
+        # apply_discount(300)=255.0  compute_tax(255.0)=round(255*0.08,2)=20.4
+        "expected_values": [255.0, 20.4],
     },
     {
         "id": "composed_final",
@@ -386,6 +454,8 @@ TASKS = [
             "originally priced at $450? Use the most direct function available."
         ),
         "hint": "final_price does it in one call. Does agent find it directly?",
+        # final_price(450) = round(450 * 0.85 * 1.08, 2) = 413.1
+        "expected_values": [413.1],
     },
     {
         "id": "multi_values",
@@ -394,6 +464,8 @@ TASKS = [
             "Return a list of all three discounted amounts."
         ),
         "hint": "Repeated single-function calls. Tests whether agent batches or loops.",
+        # apply_discount(100)=85.0  apply_discount(200)=170.0  apply_discount(500)=425.0
+        "expected_values": [85.0, 170.0, 425.0],
     },
     {
         "id": "discovery_ambiguous",
@@ -403,6 +475,8 @@ TASKS = [
             "meets the minimum order requirement."
         ),
         "hint": "Two different functions with non-obvious names. Discovery value is high.",
+        # apply_markup(80)=96.0  meets_minimum(40)=False (40 < 50)
+        "expected_values": [96.0, "false"],
     },
 ]
 
@@ -430,16 +504,17 @@ class RunResult:
     completed: bool
     final_answer: str
     elapsed_ms: int
+    correct: Optional[bool] = None    # None = not graded; True/False = graded
     error: Optional[str] = None
     tool_call_trace: List[str] = field(default_factory=list)
 
 
-def run_task(
+def run_task_anthropic(
     task: Dict,
     mode: str,
     tools: List[Dict],
     db: Curry,
-    client: anthropic.Anthropic,
+    client,          # anthropic.Anthropic
     model: str,
 ) -> RunResult:
     system = (
@@ -482,7 +557,7 @@ def run_task(
                 total_tokens=input_tokens + output_tokens,
                 first_call_to_function=first_call_to_fn,
                 completed=False, final_answer="",
-                elapsed_ms=elapsed, error=str(exc),
+                elapsed_ms=elapsed, correct=False, error=str(exc),
                 tool_call_trace=call_trace,
             )
 
@@ -531,6 +606,7 @@ def run_task(
                 if hasattr(b, "text")
             ).strip()
             elapsed = int((time.monotonic() - start_ms) * 1000)
+            ev = task.get("expected_values", [])
             return RunResult(
                 task_id=task["id"], mode=mode, turns=turns,
                 tool_calls=tool_calls, discovery_calls=discovery_calls,
@@ -539,7 +615,9 @@ def run_task(
                 total_tokens=input_tokens + output_tokens,
                 first_call_to_function=first_call_to_fn,
                 completed=True, final_answer=final_text,
-                elapsed_ms=elapsed, error=None,
+                elapsed_ms=elapsed,
+                correct=check_correctness(final_text, ev) if ev else None,
+                error=None,
                 tool_call_trace=call_trace,
             )
 
@@ -574,9 +652,171 @@ def run_task(
         total_tokens=input_tokens + output_tokens,
         first_call_to_function=first_call_to_fn,
         completed=False, final_answer="[MAX_TURNS exceeded]",
-        elapsed_ms=elapsed, error="MAX_TURNS",
+        elapsed_ms=elapsed, correct=False, error="MAX_TURNS",
         tool_call_trace=call_trace,
     )
+
+
+def run_task_ollama(
+    task: Dict,
+    mode: str,
+    tools: List[Dict],
+    db: Curry,
+    base_url: str,
+    model: str,
+) -> RunResult:
+    """Run a single benchmark task using Ollama's /api/chat endpoint with tool calling.
+
+    Ollama (>= 0.2) exposes an OpenAI-compatible tool-calling API.  The tool
+    schema format differs from Anthropic: use _to_ollama_tools() to convert.
+    Tool results are sent as role='tool' messages (one per call, in order).
+    Token counts come from prompt_eval_count / eval_count in the response body.
+    """
+    if _requests is None:
+        raise RuntimeError("requests package not found. Run: pip install requests")
+
+    system = (
+        "You are an agent with access to Curry, a deterministic functional database. "
+        "Complete the user's request using the available tools. "
+        "Be efficient -- use the minimum number of tool calls necessary. "
+        "Return a concise final answer when done."
+    )
+
+    ollama_tools = _to_ollama_tools(tools)
+    messages: List[Dict] = [{"role": "user", "content": task["prompt"]}]
+
+    turns            = 0
+    tool_calls       = 0
+    discovery_calls  = 0
+    function_calls   = 0
+    input_tokens     = 0
+    output_tokens    = 0
+    first_call_to_fn = False
+    first_call_seen  = False
+    call_trace: List[str] = []
+    start_ms = time.monotonic()
+
+    while turns < MAX_TURNS:
+        turns += 1
+        try:
+            resp = _requests.post(
+                f"{base_url.rstrip('/')}/api/chat",
+                json={
+                    "model": model,
+                    "messages": [{"role": "system", "content": system}] + messages,
+                    "tools": ollama_tools,
+                    "stream": False,
+                },
+                timeout=120.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:
+            elapsed = int((time.monotonic() - start_ms) * 1000)
+            return RunResult(
+                task_id=task["id"], mode=mode, turns=turns,
+                tool_calls=tool_calls, discovery_calls=discovery_calls,
+                function_calls=function_calls,
+                input_tokens=input_tokens, output_tokens=output_tokens,
+                total_tokens=input_tokens + output_tokens,
+                first_call_to_function=first_call_to_fn,
+                completed=False, final_answer="",
+                elapsed_ms=elapsed, correct=False, error=str(exc),
+                tool_call_trace=call_trace,
+            )
+
+        input_tokens  += data.get("prompt_eval_count", 0)
+        output_tokens += data.get("eval_count", 0)
+
+        msg             = data.get("message") or {}
+        tool_use_blocks = msg.get("tool_calls") or []
+        content_text    = (msg.get("content") or "").strip()
+
+        # Classify tool calls
+        for tc in tool_use_blocks:
+            tool_calls += 1
+            tname = tc["function"]["name"]
+            call_trace.append(tname)
+
+            is_discovery = tname in ("list_functions", "list_constants", "session_info")
+            is_fn_call   = (
+                tname == "call_function"
+                or any(
+                    tname == f"{f['name']}_v{f['latest_version']}"
+                    for f in db.list_functions()
+                )
+            )
+
+            if is_discovery:
+                discovery_calls += 1
+            if is_fn_call:
+                function_calls += 1
+
+            if not first_call_seen:
+                first_call_seen  = True
+                first_call_to_fn = is_fn_call
+
+        # Append assistant message verbatim (Ollama needs it for context)
+        messages.append(msg)
+
+        # End condition: model returned text with no tool calls
+        if not tool_use_blocks:
+            elapsed = int((time.monotonic() - start_ms) * 1000)
+            ev = task.get("expected_values", [])
+            return RunResult(
+                task_id=task["id"], mode=mode, turns=turns,
+                tool_calls=tool_calls, discovery_calls=discovery_calls,
+                function_calls=function_calls,
+                input_tokens=input_tokens, output_tokens=output_tokens,
+                total_tokens=input_tokens + output_tokens,
+                first_call_to_function=first_call_to_fn,
+                completed=True, final_answer=content_text,
+                elapsed_ms=elapsed,
+                correct=check_correctness(content_text, ev) if ev else None,
+                error=None,
+                tool_call_trace=call_trace,
+            )
+
+        # Execute each tool call and append a tool-role message for each result
+        for tc in tool_use_blocks:
+            tname  = tc["function"]["name"]
+            tinput = tc["function"].get("arguments") or {}
+            try:
+                result      = execute_tool(tname, tinput, db, mode)
+                result_text = json.dumps(result, default=str)
+            except Exception as exc:
+                result_text = json.dumps({"error": str(exc)})
+            messages.append({"role": "tool", "content": result_text})
+
+    # Hit MAX_TURNS
+    elapsed = int((time.monotonic() - start_ms) * 1000)
+    return RunResult(
+        task_id=task["id"], mode=mode, turns=turns,
+        tool_calls=tool_calls, discovery_calls=discovery_calls,
+        function_calls=function_calls,
+        input_tokens=input_tokens, output_tokens=output_tokens,
+        total_tokens=input_tokens + output_tokens,
+        first_call_to_function=first_call_to_fn,
+        completed=False, final_answer="[MAX_TURNS exceeded]",
+        elapsed_ms=elapsed, correct=False, error="MAX_TURNS",
+        tool_call_trace=call_trace,
+    )
+
+
+def run_task(
+    task: Dict,
+    mode: str,
+    tools: List[Dict],
+    db: Curry,
+    client,
+    model: str,
+    provider: str = "anthropic",
+    base_url: str = "http://localhost:11434",
+) -> RunResult:
+    """Dispatch to the correct provider implementation."""
+    if provider == "ollama":
+        return run_task_ollama(task, mode, tools, db, base_url, model)
+    return run_task_anthropic(task, mode, tools, db, client, model)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -656,11 +896,11 @@ def print_summary(
     print("-" * W)
     hdr = (f"{'Task':<24} {'Mode':<9} {'Turns':>5}  "
            f"{'In':>7}  {'Out':>6}  {'Total':>7}  {'Cost$':>8}  "
-           f"{'1stFn':>5}  {'Done':>4}")
+           f"{'1stFn':>5}  {'Done':>4}  {'Corr':>4}")
     if multi:
         hdr = (f"{'Task':<24} {'Mode':<9} {'Turns':>5}  "
                f"{'In(mean±σ)':>14}  {'Out(mean±σ)':>13}  {'Total':>7}  "
-               f"{'Cost$':>8}  {'1stFn':>5}  {'Done':>4}")
+               f"{'Cost$':>8}  {'1stFn':>5}  {'Done':>4}  {'Corr':>4}")
     print(hdr)
     print("-" * W)
 
@@ -679,17 +919,20 @@ def print_summary(
             cost      = _price(model, avg_in, avg_out)
             first_fn  = sum(1 for r in runs if r.first_call_to_function) / len(runs)
             done      = sum(1 for r in runs if r.completed) / len(runs)
+            graded    = [r for r in runs if r.correct is not None]
+            corr      = (sum(1 for r in graded if r.correct) / len(graded)) if graded else None
+            corr_col  = f"{corr:>4.0%}" if corr is not None else "  n/a"
 
             if multi:
                 in_col  = f"{avg_in:>7.0f}±{std_in:>5.0f}"
                 out_col = f"{avg_out:>6.0f}±{std_out:>5.0f}"
                 print(f"{tid:<24} {mode:<9} {avg_turns:>5.1f}  "
                       f"{in_col:>14}  {out_col:>13}  {avg_tot:>7.0f}  "
-                      f"${cost:>7.5f}  {first_fn:>4.0%}   {done:>3.0%}")
+                      f"${cost:>7.5f}  {first_fn:>4.0%}   {done:>3.0%}  {corr_col}")
             else:
                 print(f"{tid:<24} {mode:<9} {avg_turns:>5.1f}  "
                       f"{avg_in:>7.0f}  {avg_out:>6.0f}  {avg_tot:>7.0f}  "
-                      f"${cost:>7.5f}  {first_fn:>4.0%}   {done:>3.0%}")
+                      f"${cost:>7.5f}  {first_fn:>4.0%}   {done:>3.0%}  {corr_col}")
         print()
 
     # ── Aggregate comparison ──────────────────────────────────────────────────
@@ -724,6 +967,10 @@ def print_summary(
                   f"(output costs {rates['output']/rates['input']:.1f}x more per token)")
         print(f"    First call to fn     {sum(1 for r in runs if r.first_call_to_function)/len(runs):.0%}")
         print(f"    Completion rate      {sum(1 for r in runs if r.completed)/len(runs):.0%}")
+        graded = [r for r in runs if r.correct is not None]
+        if graded:
+            print(f"    Correctness rate     {sum(1 for r in graded if r.correct)/len(graded):.0%}  "
+                  f"({sum(1 for r in graded if r.correct)}/{len(graded)} tasks graded)")
 
     # ── Delta ─────────────────────────────────────────────────────────────────
     if generic and dynamic:
@@ -766,7 +1013,17 @@ def main():
     )
     parser.add_argument(
         "--model", default="claude-haiku-4-5-20251001",
-        help="Anthropic model string (default: claude-haiku-4-5-20251001)"
+        help="Model name. For anthropic: model string. For ollama: tag pulled with 'ollama pull'. "
+             "Default: claude-haiku-4-5-20251001"
+    )
+    parser.add_argument(
+        "--provider", default="anthropic", choices=["anthropic", "ollama"],
+        help="LLM provider: 'anthropic' (default) or 'ollama' for local models."
+    )
+    parser.add_argument(
+        "--base-url", dest="base_url", default="http://localhost:11434",
+        help="Base URL for the Ollama server (default: http://localhost:11434). "
+             "Ignored when provider=anthropic."
     )
     parser.add_argument(
         "--runs", type=int, default=1,
@@ -783,13 +1040,23 @@ def main():
     )
     args = parser.parse_args()
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        print("ANTHROPIC_API_KEY not set.", file=sys.stderr)
-        sys.exit(1)
+    # ── Provider setup ────────────────────────────────────────────────────────
+    if args.provider == "anthropic":
+        if anthropic is None:
+            print("anthropic package not found. Run: pip install anthropic", file=sys.stderr)
+            sys.exit(1)
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            print("ANTHROPIC_API_KEY not set.", file=sys.stderr)
+            sys.exit(1)
+        client = anthropic.Anthropic(api_key=api_key)
+    else:
+        if _requests is None:
+            print("requests package not found. Run: pip install requests", file=sys.stderr)
+            sys.exit(1)
+        client = None  # Ollama uses direct HTTP; no client object needed
 
-    client = anthropic.Anthropic(api_key=api_key)
-    db     = build_fixture()
+    db = build_fixture()
 
     system = (
         "You are an agent with access to Curry, a deterministic functional database. "
@@ -801,9 +1068,9 @@ def main():
     generic_tools = build_generic_tools()
     dynamic_tools = build_dynamic_tools(db)
 
-    # ── Schema overhead measurement (no inference cost) ───────────────────────
+    # ── Schema overhead measurement (Anthropic only) ──────────────────────────
     schema_overheads: Dict[str, int] = {}
-    if not args.no_schema_check:
+    if not args.no_schema_check and args.provider == "anthropic":
         print("\nMeasuring schema overhead via count_tokens (no inference cost)...", end="", flush=True)
         schema_overheads["generic"] = measure_schema_overhead(client, generic_tools, args.model, system)
         schema_overheads["dynamic"] = measure_schema_overhead(client, dynamic_tools, args.model, system)
@@ -816,6 +1083,8 @@ def main():
         else:
             print("  (count_tokens not supported for this model, skipping)")
             schema_overheads = {}
+    elif args.provider == "ollama":
+        print("  (schema overhead measurement skipped -- not supported for local models)")
 
     task_ids = args.tasks or [t["id"] for t in TASKS]
     tasks    = [TASK_MAP[tid] for tid in task_ids if tid in TASK_MAP]
@@ -823,9 +1092,14 @@ def main():
         print(f"No valid task IDs. Available: {list(TASK_MAP.keys())}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"\nBenchmark: {args.model}  |  {len(tasks)} tasks  |  {args.runs} run(s) each  |  2 modes")
+    print(f"\nBenchmark: {args.model}  |  provider={args.provider}  |  "
+          f"{len(tasks)} tasks  |  {args.runs} run(s) each  |  2 modes")
     if args.runs == 1:
         print("  Tip: use --runs 3 (or more) for std dev and statistical confidence.")
+    if args.provider == "ollama":
+        print(f"  Ollama base URL: {args.base_url}")
+        print("  Token costs will show $0.000000 (local model, no API cost).")
+        print("  Correctness rate is the primary quality metric for local models.")
     print(f"Generic tools  : {len(generic_tools)}")
     print(f"Dynamic tools  : {len(dynamic_tools)}  (includes {len(dynamic_tools) - 3} per-function tools)")
     print()
@@ -839,12 +1113,16 @@ def main():
             for run_n in range(args.runs):
                 run_idx += 1
                 print(f"  [{run_idx:>3}/{total_runs}] task={task['id']}  mode={mode}  run={run_n+1}", end="", flush=True)
-                result = run_task(task, mode, tools, db, client, args.model)
+                result = run_task(
+                    task, mode, tools, db, client, args.model,
+                    provider=args.provider, base_url=args.base_url,
+                )
                 all_results.append(result)
                 status = "OK" if result.completed else f"FAIL({result.error})"
+                corr_tag = f"  corr={'Y' if result.correct else ('N' if result.correct is False else '?')}"
                 print(
                     f"  turns={result.turns}  tools={result.tool_calls}  "
-                    f"in={result.input_tokens}  out={result.output_tokens}  {status}"
+                    f"in={result.input_tokens}  out={result.output_tokens}  {status}{corr_tag}"
                 )
 
     # Save raw results

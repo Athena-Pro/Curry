@@ -353,3 +353,100 @@ Enforce these before adding any new MCP tool:
 - No MCP tool exposes `register_model`, `retire_model`, or any direct core write.
 - The MCP server opens one `CurrySession` at startup; it does not open new sessions per tool call.
 - Backup runs via OS scheduler (`curry_backup.py`), not as an MCP tool.
+
+---
+
+## Running the Benchmark with a Local Model (Hermes / Ollama)
+
+The benchmark supports local models via Ollama's `/api/chat` endpoint. This is the
+primary path for evaluating NousResearch Hermes variants and any other model that
+Ollama hosts with native tool-calling support.
+
+### Prerequisites
+
+1. **Ollama running** at `http://localhost:11434` (default). Start with `ollama serve`.
+2. **Model pulled**: `ollama pull hermes3` (or the specific variant tag, e.g.
+   `ollama pull nous-hermes3`, `ollama pull hermes3:8b`, etc.).
+3. **Model registered in `curry_core.db`** so the Curry session can record
+   inference calls against it (skip if only benchmarking, not writing inferences):
+
+   ```python
+   from curry_core import Curry
+   admin = Curry("curry_core.db", read_only=False)
+   admin.register_model("hermes3", 1, checkpoint_hash="ollama-hermes3",
+                        temperature=0.7, max_tokens=4096)
+   ```
+
+### Commands
+
+```bash
+# Run the full benchmark against a locally hosted Hermes model
+python curry_agent_bench.py --provider ollama --model hermes3 --runs 3
+
+# Run against a specific variant / quantization tag
+python curry_agent_bench.py --provider ollama --model hermes3:8b --runs 3
+
+# Run only two tasks to sanity-check a new variant quickly
+python curry_agent_bench.py --provider ollama --model hermes3 \
+    --tasks single_known discovery_ambiguous --runs 1
+
+# Custom Ollama URL (non-default port or remote host)
+python curry_agent_bench.py --provider ollama --model hermes3 \
+    --base-url http://localhost:11435 --runs 3
+```
+
+### What to Expect
+
+| Feature | Anthropic | Ollama (local) |
+|---|---|---|
+| Token cost column | Real USD cost | Always $0.000000 |
+| Schema overhead | Measured via `count_tokens` | Skipped (not supported) |
+| Token counts | `usage.input_tokens` / `usage.output_tokens` | `prompt_eval_count` / `eval_count` |
+| Primary quality metric | Cost + completion rate | **Correctness rate** |
+
+### Correctness Scoring
+
+Every task in `TASKS` carries an `expected_values` list. After each run the
+benchmark calls `check_correctness(final_answer, expected_values)`:
+
+- **Numeric values** (float/int): accepted if the answer contains a number
+  within ±0.01 of the expected value (handles rounding differences).
+- **String values** (e.g. `"false"`): accepted if the string appears
+  case-insensitively anywhere in the final answer.
+- `correct=None` means a task has no expected values (not graded).
+- `correct=False` is also set for any run that hit MAX\_TURNS or errored.
+
+The `Corr` column in the per-task table and the `Correctness rate` line in the
+aggregate section show this metric. For local models, correctness rate is more
+meaningful than token cost.
+
+### Comparing Claude Baseline vs Hermes
+
+Use the same task set with both providers and compare the JSON output:
+
+```bash
+# Claude baseline (already committed in curry_bench_results.json)
+python curry_agent_bench.py --provider anthropic \
+    --model claude-haiku-4-5-20251001 --runs 3 --output results_claude.json
+
+# Hermes run
+python curry_agent_bench.py --provider ollama --model hermes3 \
+    --runs 3 --output results_hermes3.json
+```
+
+Key comparison axes:
+- **Correctness rate**: does Hermes get the right numeric answers?
+- **Turns**: does it need more tool calls to arrive at the answer?
+- **First call to function**: does it explore (discovery) or go direct?
+- **Discovery calls**: how much schema-navigation overhead does it incur?
+
+### Tool Schema Notes
+
+Ollama expects OpenAI-compatible tool schemas (`{"type": "function", "function":
+{"name", "description", "parameters"}}`). The benchmark converts automatically
+via `_to_ollama_tools()` — no manual schema changes needed.
+
+Not all Ollama models handle tool calling equally well. Hermes 3 (NousResearch)
+is specifically trained for function calling and is the recommended family for
+this benchmark.
+
