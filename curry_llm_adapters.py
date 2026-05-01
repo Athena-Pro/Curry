@@ -10,11 +10,11 @@ from typing import Any, Dict, Optional
 
 class LLMAdapter(ABC):
     """Abstract base class for LLM service adapters."""
-    
+
     def __init__(self, curry_db):
         """Initialize adapter with Curry database reference."""
         self.db = curry_db
-    
+
     @abstractmethod
     def infer(
         self,
@@ -25,7 +25,7 @@ class LLMAdapter(ABC):
     ) -> Dict[str, Any]:
         """Run inference and return output."""
         pass
-    
+
     @abstractmethod
     def infer_and_record(
         self,
@@ -40,18 +40,18 @@ class LLMAdapter(ABC):
 
 class OpenAIAdapter(LLMAdapter):
     """Adapter for OpenAI API (GPT models)."""
-    
+
     def __init__(self, curry_db, api_key: Optional[str] = None):
         """Initialize OpenAI adapter."""
         super().__init__(curry_db)
         self.api_key = api_key
-        
+
         try:
             from openai import OpenAI
             self.client = OpenAI(api_key=api_key)
         except ImportError:
             raise ImportError("openai package required. Install with: pip install openai")
-    
+
     def infer(
         self,
         model_name: str,
@@ -62,9 +62,9 @@ class OpenAIAdapter(LLMAdapter):
         """Run OpenAI inference with locked parameters."""
         # Get model config from Curry
         model_config = self.db.get_model(model_name, model_version)
-        
+
         start_time = time.time()
-        
+
         try:
             # Call OpenAI API with exact parameters from model version
             response = self.client.chat.completions.create(
@@ -77,12 +77,12 @@ class OpenAIAdapter(LLMAdapter):
                 max_tokens=model_config["max_tokens"],
                 seed=seed,  # Deterministic seed (OpenAI supports this for reproducibility)
             )
-            
+
             output_text = response.choices[0].message.content
             duration_ms = int((time.time() - start_time) * 1000)
             usage = getattr(response, "usage", None)
             request_id = getattr(response, "id", None)
-            
+
             return {
                 "success": True,
                 "output": output_text,
@@ -93,7 +93,7 @@ class OpenAIAdapter(LLMAdapter):
                 "request_id": request_id,
                 "model_response": response,
             }
-        
+
         except Exception as e:
             return {
                 "success": False,
@@ -101,7 +101,7 @@ class OpenAIAdapter(LLMAdapter):
                 "provider_error_type": e.__class__.__name__,
                 "duration_ms": int((time.time() - start_time) * 1000),
             }
-    
+
     def infer_and_record(
         self,
         model_name: str,
@@ -111,10 +111,10 @@ class OpenAIAdapter(LLMAdapter):
     ) -> str:
         """Run inference and record to Curry database."""
         result = self.infer(model_name, model_version, prompt, seed)
-        
+
         if not result["success"]:
             raise RuntimeError(f"Inference failed: {result['error']}")
-        
+
         # Record inference with full provenance
         inference_id = self.db.record_inference(
             model_name=model_name,
@@ -134,24 +134,24 @@ class OpenAIAdapter(LLMAdapter):
                 "prompt_text": prompt,
             },
         )
-        
+
         return inference_id
 
 
 class ClaudeAdapter(LLMAdapter):
     """Adapter for Anthropic Claude API."""
-    
+
     def __init__(self, curry_db, api_key: Optional[str] = None):
         """Initialize Claude adapter."""
         super().__init__(curry_db)
         self.api_key = api_key
-        
+
         try:
             from anthropic import Anthropic
             self.client = Anthropic(api_key=api_key)
         except ImportError:
             raise ImportError("anthropic package required. Install with: pip install anthropic")
-    
+
     def infer(
         self,
         model_name: str,
@@ -161,9 +161,9 @@ class ClaudeAdapter(LLMAdapter):
     ) -> Dict[str, Any]:
         """Run Claude inference with locked parameters."""
         model_config = self.db.get_model(model_name, model_version)
-        
+
         start_time = time.time()
-        
+
         try:
             # Claude API rejects requests with both temperature and top_p set.
             # Prefer temperature when present; fall back to top_p.
@@ -179,12 +179,12 @@ class ClaudeAdapter(LLMAdapter):
                 messages=[{"role": "user", "content": prompt}],
                 **extra_params,
             )
-            
+
             output_text = response.content[0].text
             duration_ms = int((time.time() - start_time) * 1000)
             usage = getattr(response, "usage", None)
             request_id = getattr(response, "id", None)
-            
+
             return {
                 "success": True,
                 "output": output_text,
@@ -195,7 +195,7 @@ class ClaudeAdapter(LLMAdapter):
                 "request_id": request_id,
                 "model_response": response,
             }
-        
+
         except Exception as e:
             return {
                 "success": False,
@@ -203,7 +203,7 @@ class ClaudeAdapter(LLMAdapter):
                 "provider_error_type": e.__class__.__name__,
                 "duration_ms": int((time.time() - start_time) * 1000),
             }
-    
+
     def infer_and_record(
         self,
         model_name: str,
@@ -213,10 +213,10 @@ class ClaudeAdapter(LLMAdapter):
     ) -> str:
         """Run inference and record to Curry database."""
         result = self.infer(model_name, model_version, prompt, seed)
-        
+
         if not result["success"]:
             raise RuntimeError(f"Inference failed: {result['error']}")
-        
+
         # Record inference
         inference_id = self.db.record_inference(
             model_name=model_name,
@@ -236,13 +236,13 @@ class ClaudeAdapter(LLMAdapter):
                 "prompt_text": prompt,
             },
         )
-        
+
         return inference_id
 
 
 class LocalModelAdapter(LLMAdapter):
     """Adapter for local models (Ollama, llama.cpp, etc.)."""
-    
+
     def __init__(
         self,
         curry_db,
@@ -257,13 +257,13 @@ class LocalModelAdapter(LLMAdapter):
         self.max_retries = max_retries
         self.retry_backoff_seconds = retry_backoff_seconds
         self.timeout_seconds = timeout_seconds
-        
+
         try:
             import requests
             self.requests = requests
         except ImportError:
             raise ImportError("requests package required. Install with: pip install requests")
-    
+
     def infer(
         self,
         model_name: str,
@@ -273,7 +273,7 @@ class LocalModelAdapter(LLMAdapter):
     ) -> Dict[str, Any]:
         """Run local model inference."""
         model_config = self.db.get_model(model_name, model_version)
-        
+
         start_time = time.time()
 
         attempts = max(1, self.max_retries + 1)
@@ -342,7 +342,7 @@ class LocalModelAdapter(LLMAdapter):
                     "duration_ms": int((time.time() - start_time) * 1000),
                     "attempts": attempt_idx + 1,
                 }
-    
+
     def infer_and_record(
         self,
         model_name: str,
@@ -352,10 +352,10 @@ class LocalModelAdapter(LLMAdapter):
     ) -> str:
         """Run inference and record to Curry database."""
         result = self.infer(model_name, model_version, prompt, seed)
-        
+
         if not result["success"]:
             raise RuntimeError(f"Inference failed: {result['error']}")
-        
+
         inference_id = self.db.record_inference(
             model_name=model_name,
             model_version=model_version,
@@ -374,7 +374,7 @@ class LocalModelAdapter(LLMAdapter):
                 "prompt_text": prompt,
             },
         )
-        
+
         return inference_id
 
 
@@ -386,8 +386,8 @@ def get_adapter(adapter_type: str, curry_db, **kwargs) -> LLMAdapter:
         "claude": ClaudeAdapter,
         "local": LocalModelAdapter,
     }
-    
+
     if adapter_type not in adapters:
         raise ValueError(f"Unknown adapter type: {adapter_type}")
-    
+
     return adapters[adapter_type](curry_db, **kwargs)
