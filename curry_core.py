@@ -424,6 +424,9 @@ class Curry:
         type_signature: str,
     ) -> None:
         """Declare a new version of a constant."""
+        # Serialize early to fail fast on bad types before touching the DB.
+        value_blob = self._serialize_constant_value(value, type_signature)
+
         cursor = self.conn.cursor()
 
         # Validate type consistency
@@ -439,6 +442,8 @@ class Curry:
                 f"but attempted to declare {type_signature}"
             )
 
+        # Advisory pre-check for a clear error message; the PRIMARY KEY
+        # constraint below is the actual guard against concurrent races.
         cursor.execute(
             "SELECT MAX(version) AS max_version FROM constants WHERE id = ?",
             (const_id,)
@@ -450,15 +455,26 @@ class Curry:
                 f"version {existing['max_version']}; got {version}"
             )
 
-        # Serialize value
-        value_blob = self._serialize_constant_value(value, type_signature)
-
-        cursor.execute(
-            """INSERT INTO constants (id, version, value, type_signature)
-               VALUES (?, ?, ?, ?)""",
-            (const_id, version, value_blob, type_signature)
-        )
-        self.conn.commit()
+        try:
+            cursor.execute(
+                """INSERT INTO constants (id, version, value, type_signature)
+                   VALUES (?, ?, ?, ?)""",
+                (const_id, version, value_blob, type_signature)
+            )
+            self.conn.commit()
+        except sqlite3.IntegrityError:
+            self.conn.rollback()
+            # Re-read to give an accurate error message after the race.
+            cursor.execute(
+                "SELECT MAX(version) AS max_version FROM constants WHERE id = ?",
+                (const_id,)
+            )
+            current_max = cursor.fetchone()["max_version"]
+            raise ValueError(
+                f"Version conflict for constant {const_id}: "
+                f"version {version} already exists or is not greater than current max "
+                f"{current_max}"
+            ) from None
 
     def retire_constant(
         self,
@@ -468,14 +484,26 @@ class Curry:
     ) -> None:
         """Mark a constant version as retired."""
         cursor = self.conn.cursor()
+        # retired_at IS NULL prevents two concurrent agents from silently
+        # double-retiring the same version (second call would overwrite
+        # retirement_tag_id with no error).
         cursor.execute(
             """UPDATE constants
                SET retired_at = CURRENT_TIMESTAMP, retirement_tag_id = ?
-               WHERE id = ? AND version = ?""",
+               WHERE id = ? AND version = ? AND retired_at IS NULL""",
             (retirement_tag, const_id, version)
         )
         if cursor.rowcount == 0:
-            raise KeyError(f"Constant {const_id}@v{version} not found")
+            self.conn.rollback()
+            # Distinguish "never existed" from "already retired".
+            cursor.execute(
+                "SELECT retired_at FROM constants WHERE id = ? AND version = ?",
+                (const_id, version)
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise KeyError(f"Constant {const_id}@v{version} not found")
+            raise ValueError(f"Constant {const_id}@v{version} is already retired")
         self.conn.commit()
 
     def get_constant(
@@ -617,6 +645,8 @@ class Curry:
 
         cursor = self.conn.cursor()
 
+        # Advisory pre-check for a clear error message; the PRIMARY KEY
+        # constraint below is the actual guard against concurrent races.
         cursor.execute(
             "SELECT MAX(version) AS max_version FROM functions WHERE name = ?",
             (name,)
@@ -627,7 +657,6 @@ class Curry:
                 f"Version for function {name} must be greater than existing max "
                 f"version {existing['max_version']}; got {version}"
             )
-
 
         # Validate all dependencies exist and are active
         for const_id, const_version in constant_bindings.items():
@@ -647,41 +676,54 @@ class Curry:
                     f"Function {name}@v{version} references non-existent function {func_name}@v{func_version}"
                 )
 
-        # Insert function
-        cursor.execute(
-            """INSERT INTO functions
-               (name, version, body, constant_bindings, function_bindings, is_pure,
-                expected_args, description, arg_descriptions)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                name, version, body,
-                json.dumps(constant_bindings),
-                json.dumps(function_bindings),
-                is_pure,
-                json.dumps(expected_args) if expected_args is not None else None,
-                description,
-                json.dumps(arg_descriptions) if arg_descriptions is not None else None,
-            )
-        )
-
-        # Record dependencies
-        for const_id, const_version in constant_bindings.items():
+        try:
+            # Insert function
             cursor.execute(
-                """INSERT INTO function_dependencies
-                   (function_name, function_version, depends_on_constant_id, depends_on_constant_version)
-                   VALUES (?, ?, ?, ?)""",
-                (name, version, const_id, const_version)
+                """INSERT INTO functions
+                   (name, version, body, constant_bindings, function_bindings, is_pure,
+                    expected_args, description, arg_descriptions)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    name, version, body,
+                    json.dumps(constant_bindings),
+                    json.dumps(function_bindings),
+                    is_pure,
+                    json.dumps(expected_args) if expected_args is not None else None,
+                    description,
+                    json.dumps(arg_descriptions) if arg_descriptions is not None else None,
+                )
             )
 
-        for func_name, func_version in function_bindings.items():
+            # Record dependencies
+            for const_id, const_version in constant_bindings.items():
+                cursor.execute(
+                    """INSERT INTO function_dependencies
+                       (function_name, function_version, depends_on_constant_id, depends_on_constant_version)
+                       VALUES (?, ?, ?, ?)""",
+                    (name, version, const_id, const_version)
+                )
+
+            for func_name, func_version in function_bindings.items():
+                cursor.execute(
+                    """INSERT INTO function_dependencies
+                       (function_name, function_version, depends_on_function_name, depends_on_function_version)
+                       VALUES (?, ?, ?, ?)""",
+                    (name, version, func_name, func_version)
+                )
+
+            self.conn.commit()
+        except sqlite3.IntegrityError:
+            self.conn.rollback()
             cursor.execute(
-                """INSERT INTO function_dependencies
-                   (function_name, function_version, depends_on_function_name, depends_on_function_version)
-                   VALUES (?, ?, ?, ?)""",
-                (name, version, func_name, func_version)
+                "SELECT MAX(version) AS max_version FROM functions WHERE name = ?",
+                (name,)
             )
-
-        self.conn.commit()
+            current_max = cursor.fetchone()["max_version"]
+            raise ValueError(
+                f"Version conflict for function {name}: "
+                f"version {version} already exists or is not greater than current max "
+                f"{current_max}"
+            ) from None
 
     def get_function(self, name: str, version: int) -> Dict[str, Any]:
         """Retrieve a function by exact version."""
@@ -722,14 +764,26 @@ class Curry:
     ) -> None:
         """Mark a function version as retired."""
         cursor = self.conn.cursor()
+        # retired_at IS NULL prevents two concurrent agents from silently
+        # double-retiring the same version (second call would overwrite
+        # retirement_tag_id with no error).
         cursor.execute(
             """UPDATE functions
                SET retired_at = CURRENT_TIMESTAMP, retirement_tag_id = ?
-               WHERE name = ? AND version = ?""",
+               WHERE name = ? AND version = ? AND retired_at IS NULL""",
             (retirement_tag, name, version)
         )
         if cursor.rowcount == 0:
-            raise KeyError(f"Function {name}@v{version} not found")
+            self.conn.rollback()
+            # Distinguish "never existed" from "already retired".
+            cursor.execute(
+                "SELECT retired_at FROM functions WHERE name = ? AND version = ?",
+                (name, version)
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise KeyError(f"Function {name}@v{version} not found")
+            raise ValueError(f"Function {name}@v{version} is already retired")
         self.conn.commit()
 
     def list_functions(self, active_only: bool = True) -> List[Dict[str, Any]]:
@@ -917,8 +971,21 @@ class Curry:
         trained_on_data_version: Optional[int] = None,
     ) -> None:
         """Register a model version with locked inference parameters."""
+        # Validate references before touching the write path.
+        if system_prompt_id is not None or system_prompt_version is not None:
+            if system_prompt_id is None or system_prompt_version is None:
+                raise ValueError("system_prompt_id and system_prompt_version must be provided together")
+            self.get_constant(system_prompt_id, system_prompt_version)
+
+        if trained_on_data_id is not None or trained_on_data_version is not None:
+            if trained_on_data_id is None or trained_on_data_version is None:
+                raise ValueError("trained_on_data_id and trained_on_data_version must be provided together")
+            self.get_constant(trained_on_data_id, trained_on_data_version)
+
         cursor = self.conn.cursor()
 
+        # Advisory pre-check for a clear error message; the PRIMARY KEY
+        # constraint below is the actual guard against concurrent races.
         cursor.execute(
             "SELECT MAX(version) AS max_version FROM model_versions WHERE model_name = ?",
             (model_name,)
@@ -930,28 +997,30 @@ class Curry:
                 f"version {existing['max_version']}; got {version}"
             )
 
-        # Validate system prompt if provided
-        if system_prompt_id is not None or system_prompt_version is not None:
-            if system_prompt_id is None or system_prompt_version is None:
-                raise ValueError("system_prompt_id and system_prompt_version must be provided together")
-            self.get_constant(system_prompt_id, system_prompt_version)
-
-        if trained_on_data_id is not None or trained_on_data_version is not None:
-            if trained_on_data_id is None or trained_on_data_version is None:
-                raise ValueError("trained_on_data_id and trained_on_data_version must be provided together")
-            self.get_constant(trained_on_data_id, trained_on_data_version)
-
-        cursor.execute(
-            """INSERT INTO model_versions
-               (model_name, version, checkpoint_hash, temperature, top_p, max_tokens,
-                system_prompt_id, system_prompt_version, model_type,
-                trained_on_data_id, trained_on_data_version)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (model_name, version, checkpoint_hash, temperature, top_p, max_tokens,
-             system_prompt_id, system_prompt_version, model_type,
-             trained_on_data_id, trained_on_data_version)
-        )
-        self.conn.commit()
+        try:
+            cursor.execute(
+                """INSERT INTO model_versions
+                   (model_name, version, checkpoint_hash, temperature, top_p, max_tokens,
+                    system_prompt_id, system_prompt_version, model_type,
+                    trained_on_data_id, trained_on_data_version)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (model_name, version, checkpoint_hash, temperature, top_p, max_tokens,
+                 system_prompt_id, system_prompt_version, model_type,
+                 trained_on_data_id, trained_on_data_version)
+            )
+            self.conn.commit()
+        except sqlite3.IntegrityError:
+            self.conn.rollback()
+            cursor.execute(
+                "SELECT MAX(version) AS max_version FROM model_versions WHERE model_name = ?",
+                (model_name,)
+            )
+            current_max = cursor.fetchone()["max_version"]
+            raise ValueError(
+                f"Version conflict for model {model_name}: "
+                f"version {version} already exists or is not greater than current max "
+                f"{current_max}"
+            ) from None
 
     def get_model(self, model_name: str, version: int) -> Dict[str, Any]:
         """Retrieve model configuration by exact version."""
