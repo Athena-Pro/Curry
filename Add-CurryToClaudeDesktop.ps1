@@ -40,7 +40,9 @@ $ErrorActionPreference = "Stop"
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
 
-$CURRY_ROOT   = "C:\AI-Local\Curry"
+# $PSScriptRoot resolves to the directory containing this script, so the repo
+# works from any path after unzipping -- no hardcoded directories needed.
+$CURRY_ROOT   = $PSScriptRoot
 $MCP_SERVER   = Join-Path $CURRY_ROOT "curry_mcp_server.py"
 $CORE_DB      = Join-Path $CURRY_ROOT "curry_core.db"
 $CLAUDE_CFG   = "$env:APPDATA\Claude\claude_desktop_config.json"
