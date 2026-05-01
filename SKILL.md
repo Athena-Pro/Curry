@@ -105,6 +105,8 @@ C:\AI-Local\Curry\
 }
 ```
 
+*Note: If `core_db` is missing or unreachable at session startup, the session will fail to open and an appropriate driver-level error (e.g., `sqlite3.OperationalError`) will be raised. Sessions require a functioning connection to the core DB to resolve model definitions and system prompts.*
+
 `mcp_tool_prefix` namespaces MCP tool names so multiple project sessions can coexist in the same Claude context without tool name collision.
 
 ### What Lives Where
@@ -223,9 +225,9 @@ All items from prior Code Review Notes and the May 2026 audit are resolved. This
 - `upsert_prompt()` / `render_prompt()` -- first-class prompt registry.
 - `archive_inference_output(inference_id, codec)` -- compressed blob storage.
 - `search_inferences()` O(n) memory -- add denormalized token-count columns for SQL-level filtering.
-- `export_schema()` -- include indices, views, triggers in output.
+- `export_schema()` -- include indices, views, triggers in output (intended for database introspection tooling, not migration tooling).
 - `TOKENS` list element validation -- `all(isinstance(t, int) for t in value)`.
-- `CURRENCY` string format validation -- document and enforce expected shape.
+- `CURRENCY` string format validation -- document and enforce expected shape (e.g., `"USD 12.50"`).
 
 ---
 
@@ -234,7 +236,7 @@ All items from prior Code Review Notes and the May 2026 audit are resolved. This
 Treat REU as **Request -> Execute -> Update**. Every call path satisfies all three phases or fails loudly with typed errors.
 
 - **Request**: Validate model/function version exists and is active. Validate payload shape. Attach deterministic call metadata (`request_id`, `seed`, effective params).
-- **Execute**: Use locked parameters only. Preserve provider errors without swallowing root cause. Enforce timeout/retry policy at adapter boundary with bounded retries.
+- **Execute**: Use locked parameters only. Preserve provider errors without swallowing root cause. Enforce timeout/retry policy at adapter boundary with bounded retries (e.g., default 3 retries with exponential backoff).
 - **Update**: Persist inference record atomically after successful execution. Ensure metadata is JSON-serializable. Return durable identifiers only (`inference_id`) once commit succeeds.
 
 Minimum REU reliability tests: success path writes exactly one inference row with complete metadata; failure path raises `RuntimeError` and writes no partial row; retryable failures obey max retry count; non-serializable metadata raises `TypeError` before write.

@@ -11,7 +11,7 @@ from curry_llm_adapters import LocalModelAdapter
 
 class TestRunner:
     """Simple test runner."""
-    
+
     def __init__(self):
         self.passed = 0
         self.failed = 0
@@ -22,14 +22,14 @@ class TestRunner:
             self.unicode_ok = True
         except (UnicodeEncodeError, AttributeError):
             self.unicode_ok = False
-    
+
     def _check(self, passed: bool) -> str:
         """Return checkmark or X, handling encoding issues."""
         if self.unicode_ok:
             return "✓" if passed else "✗"
         else:
             return "[OK]" if passed else "[FAIL]"
-    
+
     def test(self, name: str, fn):
         """Run a test."""
         try:
@@ -45,14 +45,14 @@ class TestRunner:
             self.failed += 1
             self.tests.append((name, "ERROR", str(e)))
             print(f"{self._check(False)} {name}: ERROR - {e}")
-    
+
     def summary(self):
         """Print test summary."""
         print(f"\n{'='*70}")
         print(f"Tests: {self.passed} passed, {self.failed} failed")
         print(f"Total: {self.passed + self.failed}")
         print(f"{'='*70}\n")
-        
+
         if self.failed > 0:
             print("FAILURES:")
             for name, status, error in self.tests:
@@ -63,37 +63,37 @@ class TestRunner:
 def test_constant_declaration():
     """Test declaring and retrieving constants."""
     db = Curry()
-    
+
     # Declare constant
     db.declare_constant("rate", 1, 0.1, TypeSignature.FLOAT64.value)
-    
+
     # Retrieve
     const = db.get_constant("rate", 1)
     assert const["id"] == "rate"
     assert const["version"] == 1
     assert const["value"] == 0.1
     assert const["type_signature"] == TypeSignature.FLOAT64.value
-    
+
     db.close()
 
 
 def test_constant_retirement():
     """Test retiring constants."""
     db = Curry()
-    
+
     # Declare v1
     db.declare_constant("param", 1, 10, TypeSignature.INT32.value)
-    
+
     # Retire v1
     db.retire_constant("param", 1)
-    
+
     # Should not be retrievable
     try:
         db.get_constant("param", 1)
         raise AssertionError("Should have raised ValueError for retired constant")
     except ValueError:
         pass  # Expected
-    
+
     db.close()
 
 
@@ -119,20 +119,20 @@ def test_retire_invalid_id():
 def test_type_safety():
     """Test type checking at database level."""
     db = Curry()
-    
+
     # Declare string constant
     db.declare_constant("msg", 1, "hello", TypeSignature.STRING.value)
-    
+
     # Try to declare v2 with different type
     try:
         db.declare_constant("msg", 2, 3.14, TypeSignature.FLOAT64.value)
         raise AssertionError("Should have rejected type mismatch")
     except TypeError:
         pass  # Expected
-    
+
     # Can declare v2 with same type
     db.declare_constant("msg", 2, "goodbye", TypeSignature.STRING.value)
-    
+
     db.close()
 
 
@@ -175,10 +175,10 @@ def test_constant_versions_must_increase_monotonically():
 def test_function_declaration():
     """Test declaring functions with locked dependencies."""
     db = Curry()
-    
+
     # Setup constant
     db.declare_constant("rate", 1, 0.5, TypeSignature.FLOAT64.value)
-    
+
     # Declare function using exact constant version
     db.declare_function(
         "apply_rate",
@@ -187,14 +187,14 @@ def test_function_declaration():
         constant_bindings={"rate": 1},
         is_pure=True
     )
-    
+
     # Retrieve
     func = db.get_function("apply_rate", 1)
     assert func["name"] == "apply_rate"
     assert func["version"] == 1
     assert func["constant_bindings"]["rate"] == 1
     assert func["is_pure"] is True
-    
+
     db.close()
 
 
@@ -233,13 +233,13 @@ def test_function_execution_and_caching():
 def test_function_dependency_validation():
     """Test that functions cannot use retired constants."""
     db = Curry()
-    
+
     # Declare constant
     db.declare_constant("param", 1, 100, TypeSignature.INT32.value)
-    
+
     # Retire it
     db.retire_constant("param", 1)
-    
+
     # Try to declare function using retired constant
     try:
         db.declare_function(
@@ -251,22 +251,22 @@ def test_function_dependency_validation():
         raise AssertionError("Should have rejected function using retired constant")
     except ValueError:
         pass  # Expected
-    
+
     db.close()
 
 
 def test_function_composition():
     """Test function composition and lineage tracking."""
     db = Curry()
-    
+
     # Setup constants
     db.declare_constant("a", 1, 10, TypeSignature.INT32.value)
     db.declare_constant("b", 1, 20, TypeSignature.INT32.value)
-    
+
     # Setup functions
     db.declare_function("add_a", 1, "x + a", {"a": 1}, is_pure=True)
     db.declare_function("mult_b", 1, "x * b", {"b": 1}, is_pure=True)
-    
+
     # Composite function
     db.declare_function(
         "combined",
@@ -276,13 +276,13 @@ def test_function_composition():
         function_bindings={"add_a": 1, "mult_b": 1},
         is_pure=True
     )
-    
+
     # Check lineage
     lineage = db.get_function_lineage("combined", 1)
     assert lineage["function"] == "combined@v1"
     assert len(lineage["dependencies"]["constants"]) == 2
     assert len(lineage["dependencies"]["functions"]) == 2
-    
+
     db.close()
 
 
@@ -329,7 +329,7 @@ def test_function_version_monotonicity():
 def test_model_registration():
     """Test registering models with locked parameters."""
     db = Curry()
-    
+
     # Register model
     db.register_model(
         model_name="test-model",
@@ -339,14 +339,14 @@ def test_model_registration():
         top_p=0.9,
         max_tokens=1024,
     )
-    
+
     # Retrieve
     model = db.get_model("test-model", 1)
     assert model["model_name"] == "test-model"
     assert model["version"] == 1
     assert model["temperature"] == 0.7
     assert model["max_tokens"] == 1024
-    
+
     db.close()
 
 
@@ -365,13 +365,13 @@ def test_model_version_monotonicity():
 def test_inference_recording():
     """Test recording inference results with provenance."""
     db = Curry()
-    
+
     # Setup model
     db.register_model(
         "test-model", 1, "hash123",
         temperature=0.5, top_p=0.9, max_tokens=512
     )
-    
+
     # Record inference
     inf_id = db.record_inference(
         model_name="test-model",
@@ -382,7 +382,7 @@ def test_inference_recording():
         duration_ms=100,
         metadata={"custom": "data"}
     )
-    
+
     # Retrieve
     inference = db.get_inference(inf_id)
     assert inference["model_name"] == "test-model"
@@ -390,7 +390,7 @@ def test_inference_recording():
     assert inference["output_tokens"] == b"test output"
     assert inference["seed"] == 42
     assert inference["metadata"]["custom"] == "data"
-    
+
     db.close()
 
 
@@ -454,84 +454,84 @@ def test_negative_duration_is_rejected():
 def test_inference_reproducibility():
     """Test that same input + seed produces consistent records."""
     db = Curry()
-    
+
     # Setup model
     db.register_model("model", 1, "hash", temperature=0.7, top_p=0.9, max_tokens=512)
-    
+
     # Record two inferences with same input and seed
     inf1 = db.record_inference(
         model_name="model", model_version=1,
         input_tokens="prompt", output_tokens=b"output",
         seed=42
     )
-    
+
     inf2 = db.record_inference(
         model_name="model", model_version=1,
         input_tokens="prompt", output_tokens=b"output",
         seed=42
     )
-    
+
     # Retrieve both
     res1 = db.get_inference(inf1)
     res2 = db.get_inference(inf2)
-    
+
     # Should have same model, input, output, seed
     assert res1["model_name"] == res2["model_name"]
     assert res1["model_version"] == res2["model_version"]
     assert res1["input_tokens"] == res2["input_tokens"]
     assert res1["output_tokens"] == res2["output_tokens"]
     assert res1["seed"] == res2["seed"]
-    
+
     db.close()
 
 
 def test_different_seeds_different_results():
     """Test that different seeds can produce different outputs."""
     db = Curry()
-    
+
     db.register_model("model", 1, "hash", temperature=0.9, top_p=0.9, max_tokens=512)
-    
+
     # Same input, different seed
     inf1 = db.record_inference(
         model_name="model", model_version=1,
         input_tokens="prompt", output_tokens=b"output A",
         seed=42
     )
-    
+
     inf2 = db.record_inference(
         model_name="model", model_version=1,
         input_tokens="prompt", output_tokens=b"output B",  # Different
         seed=99
     )
-    
+
     res1 = db.get_inference(inf1)
     res2 = db.get_inference(inf2)
-    
+
     assert res1["seed"] != res2["seed"]
     assert res1["output_tokens"] != res2["output_tokens"]
-    
+
     db.close()
 
 
 def test_model_version_locks_parameters():
     """Test that model versions lock inference parameters."""
     db = Curry()
-    
+
     # Register v1 with specific params
     db.register_model("m", 1, "h1", temperature=0.7, top_p=0.9, max_tokens=512)
-    
+
     # Register v2 with different params
     db.register_model("m", 2, "h2", temperature=0.3, top_p=0.8, max_tokens=1024)
-    
+
     # Get both
     v1 = db.get_model("m", 1)
     v2 = db.get_model("m", 2)
-    
+
     # Parameters should differ
     assert v1["temperature"] != v2["temperature"]
     assert v1["top_p"] != v2["top_p"]
     assert v1["max_tokens"] != v2["max_tokens"]
-    
+
     db.close()
 
 
@@ -633,20 +633,20 @@ def test_compare_inferences_diff():
 def test_retirement_tag_grouping():
     """Test atomic grouping of related retirements."""
     db = Curry()
-    
+
     # Declare constants
     db.declare_constant("a", 1, 1, TypeSignature.INT32.value)
     db.declare_constant("b", 1, 2, TypeSignature.INT32.value)
     db.declare_constant("c", 1, 3, TypeSignature.INT32.value)
-    
+
     # Create tag
     tag = db.create_retirement_tag("batch-update", "Update a, b, c together")
-    
+
     # Retire with tag
     db.retire_constant("a", 1, retirement_tag=tag)
     db.retire_constant("b", 1, retirement_tag=tag)
     db.retire_constant("c", 1, retirement_tag=tag)
-    
+
     # Verify all are retired
     for const_id in ["a", "b", "c"]:
         try:
@@ -654,7 +654,7 @@ def test_retirement_tag_grouping():
             raise AssertionError(f"Constant {const_id} should be retired")
         except ValueError:
             pass  # Expected
-    
+
     db.close()
 
 
@@ -662,13 +662,13 @@ def test_cache_eviction():
     """Test that cache eviction limits size."""
     db = Curry()
     db.declare_function("f", 1, "x", is_pure=True)
-    
+
     # Fill cache with 5 entries
     for i in range(5):
         db.call_function("f", 1, {"x": i})
-        
+
     db.evict_execution_cache(max_entries=3)
-    
+
     cursor = db.conn.cursor()
     cursor.execute("SELECT COUNT(*) as c FROM execution_cache")
     count = cursor.fetchone()["c"]
@@ -791,12 +791,12 @@ def test_deserialize_type_validation():
     """Test that deserialization validates type signatures."""
     db = Curry()
     db.declare_constant("num", 1, 10, TypeSignature.INT32.value)
-    
+
     # Manually corrupt the database type signature
     cursor = db.conn.cursor()
     cursor.execute("UPDATE constants SET type_signature = ? WHERE id = ?", (TypeSignature.STRING.value, "num"))
     db.conn.commit()
-    
+
     try:
         db.get_constant("num", 1)
         raise AssertionError("Should have raised TypeError during deserialization")
@@ -808,35 +808,35 @@ def test_deserialize_type_validation():
 def test_list_methods():
     """Test listing active constants, functions, and models."""
     db = Curry()
-    
+
     db.declare_constant("c1", 1, 10, TypeSignature.INT32.value)
     db.declare_constant("c1", 2, 20, TypeSignature.INT32.value)
     db.declare_constant("c2", 1, 30, TypeSignature.INT32.value)
     db.retire_constant("c2", 1)
-    
+
     db.declare_function("f1", 1, "c1", constant_bindings={"c1": 2})
     db.declare_function("f2", 1, "1")
     db.retire_function("f2", 1)
-    
+
     db.register_model("m1", 1, "hash1", temperature=0.5)
     db.register_model("m1", 2, "hash2", temperature=0.6)
     db.register_model("m2", 1, "hash3")
-    
+
     cursor = db.conn.cursor()
     cursor.execute("UPDATE model_versions SET retired_at = CURRENT_TIMESTAMP WHERE model_name = 'm2'")
     db.conn.commit()
-    
+
     c_list = db.list_constants()
     f_list = db.list_functions()
     m_list = db.list_models()
-    
+
     assert len(c_list) == 1
     assert c_list[0]["id"] == "c1"
     assert c_list[0]["latest_version"] == 2
-    
+
     assert len(f_list) == 1
     assert f_list[0]["name"] == "f1"
-    
+
     assert len(m_list) == 1
     assert m_list[0]["model_name"] == "m1"
     assert m_list[0]["latest_version"] == 2
@@ -848,7 +848,7 @@ def test_get_model_latest():
     db = Curry()
     db.register_model("m1", 1, "hash1", temperature=0.1)
     db.register_model("m1", 2, "hash2", temperature=0.2)
-    
+
     m = db.get_model_latest("m1")
     assert m["version"] == 2
     assert m["temperature"] == 0.2
@@ -877,10 +877,10 @@ def test_validate_function_body_unbound_variable():
         raise AssertionError("Should reject unbound variables")
     except ValueError:
         pass
-        
+
     # Should work with expected_args
     db.declare_function("f", 2, "len(x) + a", expected_args=["x", "a"])
-    
+
     # Should work with bindings
     db.declare_constant("b", 1, 10, TypeSignature.INT32.value)
     db.declare_function("g", 1, "b + sum([1, 2, 3])", constant_bindings={"b": 1})
@@ -892,12 +892,12 @@ def test_backup_database():
     with Curry() as db:
         db.declare_constant("c", 1, 99, TypeSignature.INT32.value)
         db.backup("test_backup.db")
-        
+
     assert os.path.exists("test_backup.db")
     with Curry("test_backup.db") as backup_db:
         c = backup_db.get_constant("c", 1)
         assert c["value"] == 99
-    
+
     # Clean up (ignoring windows lock errors)
     try:
         os.remove("test_backup.db")
@@ -910,15 +910,15 @@ def test_backup_database():
 def test_json_serialization():
     """Test storing JSON constants."""
     db = Curry()
-    
+
     data = {"key": "value", "nested": {"a": 1, "b": 2}}
     db.declare_constant("config", 1, data, TypeSignature.JSON_TYPE.value)
-    
+
     # Retrieve
     const = db.get_constant("config", 1)
     assert const["value"] == data
     assert const["value"]["nested"]["a"] == 1
-    
+
     db.close()
 
 
@@ -941,14 +941,14 @@ def test_bool_and_blob_constants():
 def test_string_constants():
     """Test storing string constants."""
     db = Curry()
-    
+
     text = "This is a long string\nwith multiple\nlines"
     db.declare_constant("prompt", 1, text, TypeSignature.STRING.value)
-    
+
     const = db.get_constant("prompt", 1)
     assert const["value"] == text
     assert "\n" in const["value"]
-    
+
     db.close()
 
 
@@ -957,12 +957,12 @@ def test_two_tier_session():
     import os
     import json
     from curry_core import CurrySession, TypeSignature
-    
+
     with tempfile.TemporaryDirectory() as td:
         core_db_path = os.path.join(td, "core.db")
         project_dir = os.path.join(td, "project_a")
         os.makedirs(os.path.join(project_dir, ".curry"))
-        
+
         config_path = os.path.join(project_dir, ".curry", "config.json")
         with open(config_path, "w") as f:
             json.dump({
@@ -970,32 +970,32 @@ def test_two_tier_session():
                 "core_db": core_db_path,
                 "local_db": ".curry/curry.db"
             }, f)
-            
+
         # Register stuff in core
         with Curry(core_db_path) as core:
             core.declare_constant("global_prompt", 1, "Be helpful", TypeSignature.STRING.value)
             core.register_model("claude-sonnet", 1, "hash123")
-            
+
         # Use session
         with CurrySession.from_project(project_dir) as session:
             # Model operations map to core
             models = session.list_models()
             assert len(models) == 1
             assert models[0]["model_name"] == "claude-sonnet"
-            
+
             # Local operations can access core constants
             session.declare_constant("local_var", 1, 42, TypeSignature.INT32.value)
-            
+
             # Function depends on global_prompt
             session.declare_function(
-                "test_func", 1, 
+                "test_func", 1,
                 "global_prompt + '!'",
                 constant_bindings={"global_prompt": 1}
             )
-            
+
             res = session.call_function("test_func", 1, {})
             assert res == "Be helpful!"
-            
+
             # List merges
             consts = session.list_constants()
             ids = {c["id"] for c in consts}
@@ -1008,9 +1008,9 @@ def run_all_tests():
     print("\n" + "="*70)
     print("CURRY TEST SUITE")
     print("="*70 + "\n")
-    
+
     runner = TestRunner()
-    
+
     # Constants and Types
     print("Constants and Type Safety:")
     runner.test("Constant declaration and retrieval", test_constant_declaration)
@@ -1023,7 +1023,7 @@ def run_all_tests():
     runner.test("Bool and blob constants", test_bool_and_blob_constants)
     runner.test("String constants", test_string_constants)
     runner.test("Deserialization type validation", test_deserialize_type_validation)
-    
+
     print("\nFunction Versioning:")
     runner.test("Function declaration", test_function_declaration)
     runner.test("Function execution and caching", test_function_execution_and_caching)
@@ -1032,7 +1032,7 @@ def run_all_tests():
     runner.test("Unknown function dependency rejection", test_function_dependency_rejects_unknown_function)
     runner.test("Function syntax error detection", test_function_syntax_error)
     runner.test("Function version monotonicity", test_function_version_monotonicity)
-    
+
     print("\nModel and Inference:")
     runner.test("Model registration", test_model_registration)
     runner.test("Model version monotonicity", test_model_version_monotonicity)
@@ -1043,11 +1043,11 @@ def run_all_tests():
     runner.test("Model version parameter locking", test_model_version_locks_parameters)
     runner.test("Search inferences filters and pagination", test_search_inferences_filters_and_pagination)
     runner.test("Compare inferences diff", test_compare_inferences_diff)
-    
+
     print("\nReproducibility:")
     runner.test("Inference reproducibility", test_inference_reproducibility)
     runner.test("Different seeds different results", test_different_seeds_different_results)
-    
+
     print("\nRetirement Management:")
     runner.test("Retirement tag grouping", test_retirement_tag_grouping)
     runner.test("Cache eviction", test_cache_eviction)
@@ -1056,7 +1056,7 @@ def run_all_tests():
     runner.test("REU success writes complete inference", test_reu_success_path_writes_inference_row)
     runner.test("REU failure writes no partial rows", test_reu_failure_writes_no_partial_inference)
     runner.test("REU retryable transport eventually succeeds", test_reu_retryable_transport_completes_successfully)
-    
+
     print("\nMCP Readiness:")
     runner.test("List constants, functions, models", test_list_methods)
     runner.test("Get model latest", test_get_model_latest)
@@ -1064,9 +1064,9 @@ def run_all_tests():
     runner.test("Validate function body unbound variable", test_validate_function_body_unbound_variable)
     runner.test("Backup database", test_backup_database)
     runner.test("Two-tier CurrySession architecture", test_two_tier_session)
-    
+
     runner.summary()
-    
+
     return runner.failed == 0
 
 

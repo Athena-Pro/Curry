@@ -6,7 +6,6 @@ Demonstrates functional database + LLM integration with versioning and reproduci
 import sys
 import json
 from curry_core import Curry, TypeSignature
-from curry_llm_adapters import get_adapter
 
 
 def _supports_unicode() -> bool:
@@ -43,10 +42,10 @@ def example_basic_constants_and_functions():
     print("\n" + _banner())
     print("EXAMPLE 1: Versioned Constants and Functions")
     print(_banner())
-    
+
     # Create in-memory Curry database
     db = Curry()
-    
+
     # Declare a constant: discount rate (v1)
     print("\n1. Declaring constant: base_discount_rate@v1 = 0.10")
     db.declare_constant(
@@ -55,11 +54,11 @@ def example_basic_constants_and_functions():
         value=0.10,
         type_signature=TypeSignature.FLOAT64.value
     )
-    
+
     # Retrieve it
     rate_v1 = db.get_constant("base_discount_rate", 1)
     print(f"   Retrieved: {rate_v1['value']} (type: {rate_v1['type_signature']})")
-    
+
     # Declare a function that uses exact constant version
     print("\n2. Declaring function: apply_discount@v1 using base_discount_rate@v1")
     db.declare_function(
@@ -69,11 +68,11 @@ def example_basic_constants_and_functions():
         constant_bindings={"base_discount_rate": 1},  # Locked to v1
         is_pure=True
     )
-    
+
     func_v1 = db.get_function("apply_discount", 1)
     print(f"   Function body: {func_v1['body']}")
     print(f"   Constant bindings: {func_v1['constant_bindings']}")
-    
+
     # Now retire old version and declare new one (atomically tagged)
     print("\n3. Retiring constant v1 and declaring v2 with new value")
     tag = db.create_retirement_tag(
@@ -90,14 +89,14 @@ def example_basic_constants_and_functions():
     rate_v2 = db.get_constant("base_discount_rate", 2)
     print(f"   base_discount_rate@v1 retired")
     print(f"   base_discount_rate@v2 created with value: {rate_v2['value']}")
-    
+
     # Try to retrieve retired version (should fail)
     print("\n4. Attempting to retrieve retired constant (should fail)")
     try:
         db.get_constant("base_discount_rate", 1)
     except ValueError as e:
         print(f"   {_marker(True)} Correctly rejected: {e}")
-    
+
     # Declare v2 using new constant
     print("\n5. Declaring function: apply_discount@v2 using base_discount_rate@v2")
     db.declare_function(
@@ -107,13 +106,13 @@ def example_basic_constants_and_functions():
         constant_bindings={"base_discount_rate": 2},  # Locked to v2
         is_pure=True
     )
-    
+
     # Show lineage
     print("\n6. Function lineage (dependency tree)")
     lineage = db.get_function_lineage("apply_discount", 2)
     print(f"   Function: {lineage['function']}")
     print(f"   Dependencies: {json.dumps(lineage['dependencies'], indent=2)}")
-    
+
     db.close()
 
 
@@ -122,9 +121,9 @@ def example_type_safety():
     print("\n" + _banner())
     print("EXAMPLE 2: Type Safety at Database Level")
     print(_banner())
-    
+
     db = Curry()
-    
+
     # Declare a string constant
     print("\n1. Declaring constant: greeting@v1 (String type)")
     db.declare_constant(
@@ -133,7 +132,7 @@ def example_type_safety():
         value="Hello, World!",
         type_signature=TypeSignature.STRING.value
     )
-    
+
     # Try to declare v2 with same ID but different type (should fail)
     print("\n2. Attempting to declare v2 with Float64 type (should fail)")
     try:
@@ -145,7 +144,7 @@ def example_type_safety():
         )
     except TypeError as e:
         print(f"   {_marker(True)} Correctly rejected: {e}")
-    
+
     # Declare v2 with correct type
     print("\n3. Declaring v2 with correct String type")
     db.declare_constant(
@@ -155,7 +154,7 @@ def example_type_safety():
         type_signature=TypeSignature.STRING.value
     )
     print(f"   {_marker(True)} Success")
-    
+
     db.close()
 
 
@@ -164,9 +163,9 @@ def example_model_registration_and_inference():
     print("\n" + _banner())
     print("EXAMPLE 3: Model Registration and Versioning")
     print(_banner())
-    
+
     db = Curry()
-    
+
     # Register model v1 with specific parameters
     print("\n1. Registering gpt-4@v1 with locked inference parameters")
     db.register_model(
@@ -178,12 +177,12 @@ def example_model_registration_and_inference():
         max_tokens=1024,
         model_type="gpt"
     )
-    
+
     model = db.get_model("gpt-4", 1)
     print(f"   Model: {model['model_name']}@v{model['version']}")
     print(f"   Temperature (locked): {model['temperature']}")
     print(f"   Max tokens (locked): {model['max_tokens']}")
-    
+
     # Register v2 with different parameters
     print("\n2. Registering gpt-4@v2 with different parameters")
     db.register_model(
@@ -195,11 +194,11 @@ def example_model_registration_and_inference():
         max_tokens=2048,  # Increased context
         model_type="gpt"
     )
-    
+
     model_v2 = db.get_model("gpt-4", 2)
     print(f"   Model: {model_v2['model_name']}@v{model_v2['version']}")
     print(f"   Temperature (locked): {model_v2['temperature']}")
-    
+
     # Record inference results
     print("\n3. Recording inference results (simulated)")
     inference_id = db.record_inference(
@@ -212,7 +211,7 @@ def example_model_registration_and_inference():
         metadata={"tokens_used": 45}
     )
     print(f"   Inference ID: {inference_id}")
-    
+
     # Retrieve inference
     inference = db.get_inference(inference_id)
     print(f"\n4. Retrieved inference details:")
@@ -221,7 +220,7 @@ def example_model_registration_and_inference():
     print(f"   Output: {inference['output_tokens'].decode('utf-8')}")
     print(f"   Temperature used: {inference['temperature_used']}")
     print(f"   Seed: {inference['seed']}")
-    
+
     # Record same inference again with different seed (should differ)
     print("\n5. Recording inference with different seed")
     inference_id_2 = db.record_inference(
@@ -232,12 +231,12 @@ def example_model_registration_and_inference():
         seed=99,  # Different seed
         duration_ms=210,
     )
-    
+
     inf2 = db.get_inference(inference_id_2)
     print(f"   Same model@v, different seed -> different output")
     print(f"   Output 1: {inference['output_tokens'].decode('utf-8')}")
     print(f"   Output 2: {inf2['output_tokens'].decode('utf-8')}")
-    
+
     db.close()
 
 
@@ -246,14 +245,14 @@ def example_deterministic_reproducibility():
     print("\n" + _banner())
     print("EXAMPLE 4: Deterministic Reproducibility")
     print(_banner())
-    
+
     db = Curry()
-    
+
     # Setup: declare constants and model
     print("\n1. Setting up: Constants and Model")
     db.declare_constant("temperature_setting", 1, 0.7, TypeSignature.FLOAT64.value)
     db.declare_constant("system_prompt", 1, "Be concise.", TypeSignature.STRING.value)
-    
+
     db.register_model(
         model_name="test-model",
         version=1,
@@ -264,7 +263,7 @@ def example_deterministic_reproducibility():
         system_prompt_id="system_prompt",
         system_prompt_version=1
     )
-    
+
     # Record inference A
     inference_a = db.record_inference(
         model_name="test-model",
@@ -275,7 +274,7 @@ def example_deterministic_reproducibility():
         duration_ms=150
     )
     print(f"   Inference A ID: {inference_a}")
-    
+
     # Record inference B with exact same inputs
     inference_b = db.record_inference(
         model_name="test-model",
@@ -286,18 +285,18 @@ def example_deterministic_reproducibility():
         duration_ms=148
     )
     print(f"   Inference B ID (same inputs): {inference_b}")
-    
+
     # Retrieve and compare
     print("\n2. Comparing Results")
     a = db.get_inference(inference_a)
     b = db.get_inference(inference_b)
-    
+
     print(f"   Model:      {a['model_name']}@v{a['model_version']} == {b['model_name']}@v{b['model_version']}")
     print(f"   Input:      {a['input_tokens']} == {b['input_tokens']}")
     print(f"   Seed:       {a['seed']} == {b['seed']}")
     print(f"   Output:     {a['output_tokens']} == {b['output_tokens']}")
     print(f"   {_marker(True)} IDENTICAL: Reproducibility guaranteed!")
-    
+
     # Now change one parameter
     print("\n3. Changing seed (should produce different output path)")
     inference_c = db.record_inference(
@@ -308,12 +307,12 @@ def example_deterministic_reproducibility():
         seed=99999,  # Different seed
         duration_ms=145
     )
-    
+
     c = db.get_inference(inference_c)
     print(f"   Seed:       {c['seed']} (different)")
     print(f"   Output:     {c['output_tokens'].decode('utf-8')} (different)")
     print(f"   {_marker(True)} Different seeds can produce different outputs")
-    
+
     db.close()
 
 
@@ -322,14 +321,14 @@ def example_versioning_cascade():
     print("\n" + _banner())
     print("EXAMPLE 5: Versioning and Dependency Management")
     print(_banner())
-    
+
     db = Curry()
-    
+
     # Create initial setup
     print("\n1. Initial setup:")
     print("   - Constant: threshold@v1")
     print("   - Function: check_threshold@v1 (uses threshold@v1)")
-    
+
     db.declare_constant("threshold", 1, 100, TypeSignature.INT32.value)
     db.declare_function(
         name="check_threshold",
@@ -338,12 +337,12 @@ def example_versioning_cascade():
         constant_bindings={"threshold": 1},  # References the constant ID
         is_pure=True
     )
-    
+
     # Verify lineage
     lineage = db.get_function_lineage("check_threshold", 1)
     print(f"\n2. Function lineage:")
     print(f"   {json.dumps(lineage, indent=3)}")
-    
+
     # Create a new version of the constant
     print("\n3. Creating threshold@v2 (retirement tag)")
     tag = db.create_retirement_tag(
@@ -352,24 +351,24 @@ def example_versioning_cascade():
     )
     db.retire_constant("threshold", 1, retirement_tag=tag)
     db.declare_constant("threshold", 2, 150, TypeSignature.INT32.value)
-    
+
     print(f"   threshold@v1 retired")
     print(f"   threshold@v2 created with value 150")
-    
+
     # Try to retrieve retired constant (should fail)
     print("\n4. Attempting to use retired constant:")
     try:
-        const = db.get_constant("threshold", 1)
+        db.get_constant("threshold", 1)
         print(f"   {_marker(False)} Should have failed!")
     except ValueError as e:
         print(f"   {_marker(True)} Correctly rejected: {e}")
-    
+
     # Function v1 is now locked to retired dependency
     print("\n5. Function check_threshold@v1 status:")
     print(f"   {_marker(True)} Still locked to threshold@v1")
     print(f"   {_note('⚠', '[WARN]')} But threshold@v1 is now retired")
     print(f"   {_note('→', '->')} Function should be considered 'stale' or require migration")
-    
+
     # Create function v2 using new constant
     print("\n6. Creating check_threshold@v2 using threshold@v2")
     db.declare_function(
@@ -380,7 +379,7 @@ def example_versioning_cascade():
         is_pure=True
     )
     print(f"   {_marker(True)} check_threshold@v2 created with fresh bindings")
-    
+
     db.close()
 
 
@@ -389,16 +388,16 @@ def example_with_real_llm():
     print("\n" + _banner())
     print("EXAMPLE 6: Real LLM Integration (Claude API)")
     print(_banner())
-    
+
     print("\nNOTE: This example requires ANTHROPIC_API_KEY environment variable.")
     print("To run with real inference, uncomment the code and set your API key.")
-    
+
     # Uncomment to run with real API:
     """
     import os
-    
+
     db = Curry("curry_example.db")
-    
+
     # Register Claude model
     print("\n1. Registering claude-3-5-sonnet with inference parameters")
     db.register_model(
@@ -410,10 +409,10 @@ def example_with_real_llm():
         max_tokens=1024,
         model_type="claude"
     )
-    
+
     # Get Claude adapter
     adapter = get_adapter("claude", db, api_key=os.environ.get("ANTHROPIC_API_KEY"))
-    
+
     # Run inference
     print("\n2. Running inference with Claude")
     prompt = "Explain quantum computing in 2 sentences."
@@ -424,7 +423,7 @@ def example_with_real_llm():
         seed=42
     )
     print(f"   Inference recorded: {inference_id}")
-    
+
     # Retrieve and display
     inference = db.get_inference(inference_id)
     print(f"\n3. Inference results:")
@@ -432,10 +431,10 @@ def example_with_real_llm():
     print(f"   Prompt: {prompt}")
     print(f"   Response: {inference['output_tokens'].decode('utf-8')[:200]}...")
     print(f"   Duration: {inference['execution_duration_ms']}ms")
-    
+
     db.close()
     """
-    
+
     print("\nExample setup complete. Create your own database with:")
     print("  from curry_core import Curry")
     print("  from curry_llm_adapters import get_adapter")
@@ -447,7 +446,7 @@ def main():
     print("  CURRY: Functional Database for LLM Operations")
     print("  Working Examples and Demonstrations")
     print(_banner("#" if not UNICODE_OK else "█"))
-    
+
     # Run all examples
     example_basic_constants_and_functions()
     example_type_safety()
@@ -455,7 +454,7 @@ def main():
     example_deterministic_reproducibility()
     example_versioning_cascade()
     example_with_real_llm()
-    
+
     print("\n" + _banner())
     print("ALL EXAMPLES COMPLETED")
     print(_banner())

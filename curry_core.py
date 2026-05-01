@@ -15,8 +15,8 @@ from enum import Enum
 
 
 _SAFE_BUILTINS = {
-    "abs": abs, "all": all, "any": any, "bool": bool, "dict": dict, 
-    "enumerate": enumerate, "filter": filter, "float": float, "int": int, 
+    "abs": abs, "all": all, "any": any, "bool": bool, "dict": dict,
+    "enumerate": enumerate, "filter": filter, "float": float, "int": int,
     "len": len, "list": list, "map": map, "max": max, "min": min,
     "set": set, "str": str, "sum": sum, "tuple": tuple, "zip": zip,
     "round": round
@@ -40,10 +40,10 @@ class VersionedRef:
     """Reference to a versioned entity (constant, function, or model)."""
     name: str
     version: int
-    
+
     def __str__(self):
         return f"{self.name}@v{self.version}"
-    
+
     @staticmethod
     def parse(ref_str: str) -> 'VersionedRef':
         """Parse 'name@v3' format."""
@@ -55,7 +55,7 @@ class VersionedRef:
 
 class Curry:
     """Main Curry database interface."""
-    
+
     def __init__(self, db_path: str = ":memory:", fallback_db: Optional['Curry'] = None, uri: bool = False):
         """Initialize Curry with SQLite backend."""
         self.db_path = db_path
@@ -70,11 +70,11 @@ class Curry:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
-    
+
     def _initialize_schema(self):
         """Create all tables and triggers for Curry."""
         cursor = self.conn.cursor()
-        
+
         # Retirement tags: group related retirements
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS retirement_tags (
@@ -84,7 +84,7 @@ class Curry:
                 description TEXT
             )
         """)
-        
+
         # Constants: immutable, versioned values
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS constants (
@@ -95,12 +95,12 @@ class Curry:
                 declared_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 retired_at TIMESTAMP,
                 retirement_tag_id TEXT,
-                
+
                 PRIMARY KEY (id, version),
                 FOREIGN KEY (retirement_tag_id) REFERENCES retirement_tags(tag_id)
             )
         """)
-        
+
         # Type compatibility: ensure type consistency across versions
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS type_compatibility (
@@ -109,13 +109,13 @@ class Curry:
                 to_version INTEGER NOT NULL,
                 is_compatible BOOLEAN DEFAULT 1,
                 conversion_function TEXT,
-                
+
                 PRIMARY KEY (constant_id, from_version, to_version),
                 FOREIGN KEY (constant_id, from_version) REFERENCES constants(id, version),
                 FOREIGN KEY (constant_id, to_version) REFERENCES constants(id, version)
             )
         """)
-        
+
         # Functions: composed from constants and other functions
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS functions (
@@ -128,17 +128,17 @@ class Curry:
                 declared_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 retired_at TIMESTAMP,
                 retirement_tag_id TEXT,
-                
+
                 PRIMARY KEY (name, version),
                 FOREIGN KEY (retirement_tag_id) REFERENCES retirement_tags(tag_id)
             )
         """)
-        
+
         try:
             cursor.execute("ALTER TABLE functions ADD COLUMN expected_args TEXT")
         except sqlite3.OperationalError:
             pass
-        
+
         # Function dependencies: track exact versions used
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS function_dependencies (
@@ -149,15 +149,15 @@ class Curry:
                 depends_on_constant_version INTEGER,
                 depends_on_function_name TEXT,
                 depends_on_function_version INTEGER,
-                
+
                 FOREIGN KEY (function_name, function_version) REFERENCES functions(name, version),
-                FOREIGN KEY (depends_on_constant_id, depends_on_constant_version) 
+                FOREIGN KEY (depends_on_constant_id, depends_on_constant_version)
                     REFERENCES constants(id, version),
-                FOREIGN KEY (depends_on_function_name, depends_on_function_version) 
+                FOREIGN KEY (depends_on_function_name, depends_on_function_version)
                     REFERENCES functions(name, version)
             )
         """)
-        
+
         # Model versions: LLM checkpoints with locked inference parameters
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS model_versions (
@@ -167,31 +167,31 @@ class Curry:
                 model_type TEXT,  -- 'llama', 'gpt', 'claude', etc.
                 base_model_name TEXT,
                 base_model_version INTEGER,
-                
+
                 -- Inference parameters (locked at version time)
                 temperature REAL,
                 top_p REAL,
                 max_tokens INTEGER,
-                
+
                 -- System prompt reference
                 system_prompt_id TEXT,
                 system_prompt_version INTEGER,
-                
+
                 -- Training lineage
                 trained_on_data_id TEXT,
                 trained_on_data_version INTEGER,
-                
+
                 declared_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 retired_at TIMESTAMP,
                 retirement_tag_id TEXT,
-                
+
                 PRIMARY KEY (model_name, version),
                 FOREIGN KEY (retirement_tag_id) REFERENCES retirement_tags(tag_id),
-                FOREIGN KEY (system_prompt_id, system_prompt_version) 
+                FOREIGN KEY (system_prompt_id, system_prompt_version)
                     REFERENCES constants(id, version)
             )
         """)
-        
+
         # Prompts: template compositions with input/output schemas
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS prompts (
@@ -204,18 +204,18 @@ class Curry:
                 instruction_template TEXT NOT NULL,
                 input_schema TEXT,  -- JSON
                 output_schema TEXT,  -- JSON
-                
+
                 declared_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 retired_at TIMESTAMP,
                 retirement_tag_id TEXT,
-                
+
                 PRIMARY KEY (prompt_id, version),
                 FOREIGN KEY (retirement_tag_id) REFERENCES retirement_tags(tag_id),
-                FOREIGN KEY (system_prompt_id, system_prompt_version) 
+                FOREIGN KEY (system_prompt_id, system_prompt_version)
                     REFERENCES constants(id, version)
             )
         """)
-        
+
         # Inferences: LLM inference results with full provenance
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS inferences (
@@ -224,19 +224,19 @@ class Curry:
                 model_version INTEGER NOT NULL,
                 input_tokens TEXT,  -- JSON or text representation
                 output_tokens BLOB NOT NULL,
-                
+
                 temperature_used REAL,
                 top_p_used REAL,
                 seed INTEGER,
-                
+
                 execution_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 execution_duration_ms INTEGER,
                 metadata TEXT,  -- JSON: cost, latency details, etc.
-                
+
                 FOREIGN KEY (model_name, model_version) REFERENCES model_versions(model_name, version)
             )
         """)
-        
+
         # Execution cache: deterministic memoization
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS execution_cache (
@@ -247,16 +247,16 @@ class Curry:
                 cached_result BLOB NOT NULL,
                 cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 hit_count INTEGER DEFAULT 1,
-                
+
                 PRIMARY KEY (function_name, function_version, input_hash),
                 FOREIGN KEY (function_name, function_version) REFERENCES functions(name, version)
             )
         """)
-        
+
         # Note: Validation is done in Python layer for clarity and robustness
         # Type checking happens in declare_constant() method
         # Dependency validation happens in declare_function() method
-        
+
         self.conn.commit()
 
     def _validate_type_signature(self, type_signature: str) -> TypeSignature:
@@ -318,7 +318,7 @@ class Curry:
             return raw_value
 
         value = json.loads(raw_value.decode("utf-8"))
-        
+
         # Validate that the retrieved value still matches the declared type
         if type_enum == TypeSignature.FLOAT64 and (not isinstance(value, (int, float)) or isinstance(value, bool)):
             raise TypeError("Float64 constants must be numeric")
@@ -332,7 +332,7 @@ class Curry:
             raise TypeError(f"{type_signature} constants must be strings, lists of integers, or dictionaries")
         elif type_enum == TypeSignature.CURRENCY and (not isinstance(value, (int, float, str)) or isinstance(value, bool)):
             raise TypeError("Currency constants must be numeric or string values")
-            
+
         return value
 
     def _serialize_cached_result(self, result: Any) -> bytes:
@@ -401,11 +401,11 @@ class Curry:
             "source_type": type(input_tokens).__name__,
         }
         return normalized
-    
+
     # ============================================================================
     # CONSTANT OPERATIONS
     # ============================================================================
-    
+
     def declare_constant(
         self,
         const_id: str,
@@ -415,7 +415,7 @@ class Curry:
     ) -> None:
         """Declare a new version of a constant."""
         cursor = self.conn.cursor()
-        
+
         # Validate type consistency
         cursor.execute(
             "SELECT DISTINCT type_signature FROM constants WHERE id = ? LIMIT 2",
@@ -439,17 +439,17 @@ class Curry:
                 f"Version for constant {const_id} must be greater than existing max "
                 f"version {existing['max_version']}; got {version}"
             )
-        
+
         # Serialize value
         value_blob = self._serialize_constant_value(value, type_signature)
-        
+
         cursor.execute(
             """INSERT INTO constants (id, version, value, type_signature)
                VALUES (?, ?, ?, ?)""",
             (const_id, version, value_blob, type_signature)
         )
         self.conn.commit()
-    
+
     def retire_constant(
         self,
         const_id: str,
@@ -459,7 +459,7 @@ class Curry:
         """Mark a constant version as retired."""
         cursor = self.conn.cursor()
         cursor.execute(
-            """UPDATE constants 
+            """UPDATE constants
                SET retired_at = CURRENT_TIMESTAMP, retirement_tag_id = ?
                WHERE id = ? AND version = ?""",
             (retirement_tag, const_id, version)
@@ -467,7 +467,7 @@ class Curry:
         if cursor.rowcount == 0:
             raise KeyError(f"Constant {const_id}@v{version} not found")
         self.conn.commit()
-    
+
     def get_constant(
         self,
         const_id: str,
@@ -486,13 +486,13 @@ class Curry:
             if self.fallback_db:
                 return self.fallback_db.get_constant(const_id, version)
             raise KeyError(f"Constant {const_id}@v{version} not found")
-        
+
         if row["retired_at"]:
             raise ValueError(f"Constant {const_id}@v{version} has been retired")
-        
+
         # Deserialize value
         value = self._deserialize_constant_value(row["value"], row["type_signature"])
-        
+
         return {
             "id": row["id"],
             "version": row["version"],
@@ -500,7 +500,7 @@ class Curry:
             "type_signature": row["type_signature"],
             "declared_at": row["declared_at"],
         }
-    
+
     def get_constant_latest(self, const_id: str) -> Dict[str, Any]:
         """Get the most recent active version of a constant."""
         cursor = self.conn.cursor()
@@ -517,9 +517,9 @@ class Curry:
             if self.fallback_db:
                 return self.fallback_db.get_constant_latest(const_id)
             raise KeyError(f"No active version of constant {const_id} found")
-        
+
         value = self._deserialize_constant_value(row["value"], row["type_signature"])
-        
+
         return {
             "id": row["id"],
             "version": row["version"],
@@ -537,20 +537,20 @@ class Curry:
         query += " GROUP BY id"
         cursor.execute(query)
         results = [dict(row) for row in cursor.fetchall()]
-        
+
         if self.fallback_db:
             fallback_results = self.fallback_db.list_constants(active_only)
             local_ids = {r["id"] for r in results}
             for fr in fallback_results:
                 if fr["id"] not in local_ids:
                     results.append(fr)
-                    
+
         return results
-    
+
     # ============================================================================
     # FUNCTION OPERATIONS
     # ============================================================================
-    
+
     def validate_function_body(
         self, body: str, allowed_names: Set[str], expected_args: Optional[List[str]] = None
     ) -> None:
@@ -559,14 +559,14 @@ class Curry:
             tree = ast.parse(body, mode='eval')
         except SyntaxError as e:
             raise ValueError(f"Function body has syntax error: {e}")
-            
+
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute):
                 if node.attr.startswith("__"):
                     raise ValueError(f"Unsafe dunder attribute access: .{node.attr}")
                 if isinstance(node.value, ast.Name) and node.value.id.startswith("__"):
                     raise ValueError(f"Unsafe access on {node.value.id}")
-            
+
             if isinstance(node, ast.Name):
                 if node.id not in allowed_names and node.id not in _SAFE_BUILTINS:
                     if expected_args is not None and node.id not in expected_args:
@@ -585,7 +585,7 @@ class Curry:
         """Declare a versioned function with exact dependency versions."""
         constant_bindings = constant_bindings or {}
         function_bindings = function_bindings or {}
-        
+
         allowed_names = set(constant_bindings.keys()) | set(function_bindings.keys())
         try:
             self.validate_function_body(body, allowed_names, expected_args)
@@ -593,7 +593,7 @@ class Curry:
             raise ValueError(f"Function {name}@v{version} body is invalid: {e}")
 
         cursor = self.conn.cursor()
-        
+
         cursor.execute(
             "SELECT MAX(version) AS max_version FROM functions WHERE name = ?",
             (name,)
@@ -604,8 +604,8 @@ class Curry:
                 f"Version for function {name} must be greater than existing max "
                 f"version {existing['max_version']}; got {version}"
             )
-        
-        
+
+
         # Validate all dependencies exist and are active
         for const_id, const_version in constant_bindings.items():
             try:
@@ -615,7 +615,7 @@ class Curry:
                     f"Function {name}@v{version} references non-existent constant {const_id}@v{const_version}"
                 )
             # get_constant already checks for retired_at and raises ValueError
-        
+
         for func_name, func_version in function_bindings.items():
             try:
                 self.get_function(func_name, func_version)
@@ -623,34 +623,34 @@ class Curry:
                 raise ValueError(
                     f"Function {name}@v{version} references non-existent function {func_name}@v{func_version}"
                 )
-        
+
         # Insert function
         cursor.execute(
-            """INSERT INTO functions 
+            """INSERT INTO functions
                (name, version, body, constant_bindings, function_bindings, is_pure, expected_args)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (name, version, body, json.dumps(constant_bindings), json.dumps(function_bindings), is_pure, json.dumps(expected_args) if expected_args is not None else None)
         )
-        
+
         # Record dependencies
         for const_id, const_version in constant_bindings.items():
             cursor.execute(
-                """INSERT INTO function_dependencies 
+                """INSERT INTO function_dependencies
                    (function_name, function_version, depends_on_constant_id, depends_on_constant_version)
                    VALUES (?, ?, ?, ?)""",
                 (name, version, const_id, const_version)
             )
-        
+
         for func_name, func_version in function_bindings.items():
             cursor.execute(
-                """INSERT INTO function_dependencies 
+                """INSERT INTO function_dependencies
                    (function_name, function_version, depends_on_function_name, depends_on_function_version)
                    VALUES (?, ?, ?, ?)""",
                 (name, version, func_name, func_version)
             )
-        
+
         self.conn.commit()
-    
+
     def get_function(self, name: str, version: int) -> Dict[str, Any]:
         """Retrieve a function by exact version."""
         cursor = self.conn.cursor()
@@ -665,10 +665,10 @@ class Curry:
             if self.fallback_db:
                 return self.fallback_db.get_function(name, version)
             raise KeyError(f"Function {name}@v{version} not found")
-        
+
         if row["retired_at"]:
             raise ValueError(f"Function {name}@v{version} has been retired")
-        
+
         return {
             "name": row["name"],
             "version": row["version"],
@@ -678,7 +678,7 @@ class Curry:
             "is_pure": bool(row["is_pure"]),
             "expected_args": json.loads(row["expected_args"]) if row["expected_args"] is not None else None,
         }
-    
+
     def retire_function(
         self,
         name: str,
@@ -688,7 +688,7 @@ class Curry:
         """Mark a function version as retired."""
         cursor = self.conn.cursor()
         cursor.execute(
-            """UPDATE functions 
+            """UPDATE functions
                SET retired_at = CURRENT_TIMESTAMP, retirement_tag_id = ?
                WHERE name = ? AND version = ?""",
             (retirement_tag, name, version)
@@ -713,20 +713,20 @@ class Curry:
             else:
                 d["expected_args"] = None
             results.append(d)
-            
+
         if self.fallback_db:
             fallback_results = self.fallback_db.list_functions(active_only)
             local_names = {r["name"] for r in results}
             for fr in fallback_results:
                 if fr["name"] not in local_names:
                     results.append(fr)
-                    
+
         return results
-    
+
     # ============================================================================
     # EXECUTION AND COMPOSITION
     # ============================================================================
-    
+
     def call_function(
         self,
         name: str,
@@ -808,11 +808,11 @@ class Curry:
                 pass
 
         return result
-    
+
     def get_function_lineage(self, name: str, version: int) -> Dict[str, Any]:
         """Get complete dependency tree for a function."""
         cursor = self.conn.cursor()
-        
+
         def get_dependencies(
             fn_name: str,
             fn_version: int,
@@ -828,7 +828,7 @@ class Curry:
                     "cycle_at": current_key,
                 }
             current_path.add(current_key)
-            
+
             cursor.execute(
                 """SELECT depends_on_constant_id, depends_on_constant_version,
                           depends_on_function_name, depends_on_function_version
@@ -837,7 +837,7 @@ class Curry:
                 (fn_name, fn_version)
             )
             deps = {"constants": [], "functions": []}
-            
+
             for row in cursor.fetchall():
                 if row["depends_on_constant_id"]:
                     deps["constants"].append({
@@ -854,18 +854,18 @@ class Curry:
                             current_path
                         ),
                     })
-            
+
             return deps
-        
+
         return {
             "function": f"{name}@v{version}",
             "dependencies": get_dependencies(name, version),
         }
-    
+
     # ============================================================================
     # MODEL AND INFERENCE OPERATIONS
     # ============================================================================
-    
+
     def register_model(
         self,
         model_name: str,
@@ -882,7 +882,7 @@ class Curry:
     ) -> None:
         """Register a model version with locked inference parameters."""
         cursor = self.conn.cursor()
-        
+
         cursor.execute(
             "SELECT MAX(version) AS max_version FROM model_versions WHERE model_name = ?",
             (model_name,)
@@ -893,7 +893,7 @@ class Curry:
                 f"Version for model {model_name} must be greater than existing max "
                 f"version {existing['max_version']}; got {version}"
             )
-        
+
         # Validate system prompt if provided
         if system_prompt_id is not None or system_prompt_version is not None:
             if system_prompt_id is None or system_prompt_version is None:
@@ -904,10 +904,10 @@ class Curry:
             if trained_on_data_id is None or trained_on_data_version is None:
                 raise ValueError("trained_on_data_id and trained_on_data_version must be provided together")
             self.get_constant(trained_on_data_id, trained_on_data_version)
-        
+
         cursor.execute(
-            """INSERT INTO model_versions 
-               (model_name, version, checkpoint_hash, temperature, top_p, max_tokens, 
+            """INSERT INTO model_versions
+               (model_name, version, checkpoint_hash, temperature, top_p, max_tokens,
                 system_prompt_id, system_prompt_version, model_type,
                 trained_on_data_id, trained_on_data_version)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -916,7 +916,7 @@ class Curry:
              trained_on_data_id, trained_on_data_version)
         )
         self.conn.commit()
-    
+
     def get_model(self, model_name: str, version: int) -> Dict[str, Any]:
         """Retrieve model configuration by exact version."""
         cursor = self.conn.cursor()
@@ -930,7 +930,7 @@ class Curry:
             if self.fallback_db:
                 return self.fallback_db.get_model(model_name, version)
             raise KeyError(f"Model {model_name}@v{version} not found")
-        
+
         return {
             "model_name": row["model_name"],
             "version": row["version"],
@@ -972,16 +972,16 @@ class Curry:
         query += " GROUP BY model_name"
         cursor.execute(query)
         results = [dict(row) for row in cursor.fetchall()]
-        
+
         if self.fallback_db:
             fallback_results = self.fallback_db.list_models(active_only)
             local_names = {r["model_name"] for r in results}
             for fr in fallback_results:
                 if fr["model_name"] not in local_names:
                     results.append(fr)
-                    
+
         return results
-    
+
     def record_inference(
         self,
         model_name: str,
@@ -1000,7 +1000,7 @@ class Curry:
 
         if duration_ms is not None and duration_ms < 0:
             raise ValueError("duration_ms must be non-negative when provided")
-        
+
         # Get model to verify it exists
         model = self.get_model(model_name, model_version)
         if temperature_used is None:
@@ -1017,7 +1017,7 @@ class Curry:
             raise TypeError(f"metadata must be JSON-serializable: {exc}") from exc
 
         cursor.execute(
-            """INSERT INTO inferences 
+            """INSERT INTO inferences
                (inference_id, model_name, model_version, input_tokens, output_tokens,
                 temperature_used, top_p_used, seed, execution_duration_ms, metadata)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -1026,9 +1026,9 @@ class Curry:
              seed, duration_ms, metadata_json)
         )
         self.conn.commit()
-        
+
         return inference_id
-    
+
     def get_inference(self, inference_id: str) -> Dict[str, Any]:
         """Retrieve an inference record with full provenance."""
         cursor = self.conn.cursor()
@@ -1039,7 +1039,7 @@ class Curry:
         row = cursor.fetchone()
         if not row:
             raise KeyError(f"Inference {inference_id} not found")
-        
+
         return {
             "inference_id": row["inference_id"],
             "model_name": row["model_name"],
@@ -1182,11 +1182,11 @@ class Curry:
                 ),
             },
         }
-    
+
     # ============================================================================
     # RETIREMENT AND TAGGING
     # ============================================================================
-    
+
     def create_retirement_tag(self, tag_id: str, reason: str, description: Optional[str] = None) -> str:
         """Create a retirement tag to group related retirements."""
         cursor = self.conn.cursor()
@@ -1210,7 +1210,7 @@ class Curry:
             (max_entries,)
         )
         self.conn.commit()
-    
+
     def close(self):
         """Close the database connection."""
         self.conn.close()
@@ -1219,7 +1219,7 @@ class Curry:
         """Safely backup the database to a target file."""
         with sqlite3.connect(target_path) as dst:
             self.conn.backup(dst, pages=pages, sleep=sleep)
-    
+
     def export_schema(self) -> str:
         """Export the current schema as SQL."""
         cursor = self.conn.cursor()
@@ -1231,7 +1231,7 @@ import os
 
 class CurrySession:
     """A two-tier session managing a global core DB and a local project DB."""
-    
+
     def __init__(self, core_db: Curry, local_db: Curry, config: Dict[str, Any]):
         self.core_db = core_db
         self.local_db = local_db
@@ -1242,36 +1242,36 @@ class CurrySession:
         config_path = os.path.join(project_dir, ".curry", "config.json")
         if not os.path.exists(config_path):
             raise FileNotFoundError(f"Curry config not found at {config_path}")
-            
+
         with open(config_path, "r") as f:
             config = json.load(f)
-            
+
         core_db_path = config.get("core_db")
         if not core_db_path:
             raise ValueError("config.json must specify 'core_db'")
-            
+
         # For relative paths in config, resolve them relative to project_dir
         local_db_path = config.get("local_db", ".curry/curry.db")
         if not os.path.isabs(local_db_path):
             local_db_path = os.path.join(project_dir, local_db_path)
-            
+
         # Open core as read-only — no accidental writes from project sessions
         core_db_uri = f"file:{core_db_path.replace(chr(92), '/')}?mode=ro"
         core_db = Curry(core_db_uri, uri=True)
-        
+
         # Ensure local db dir exists
         os.makedirs(os.path.dirname(local_db_path), exist_ok=True)
         local_db = Curry(local_db_path, fallback_db=core_db)
-        
+
         return cls(core_db, local_db, config)
 
     def close(self):
         self.local_db.close()
         self.core_db.close()
-        
+
     def __enter__(self):
         return self
-        
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
@@ -1281,16 +1281,16 @@ class CurrySession:
             "register_model writes to the global core DB and cannot be called from a project session. "
             "Use Curry(core_db_path) directly for model registration."
         )
-        
+
     def get_model(self, *args, **kwargs):
         return self.core_db.get_model(*args, **kwargs)
-        
+
     def get_model_latest(self, *args, **kwargs):
         return self.core_db.get_model_latest(*args, **kwargs)
-        
+
     def list_models(self, *args, **kwargs):
         return self.core_db.list_models(*args, **kwargs)
-        
+
     def retire_model(self, *args, **kwargs):
         raise PermissionError(
             "retire_model writes to the global core DB and cannot be called from a project session. "
@@ -1300,49 +1300,49 @@ class CurrySession:
     # Local operations -> local_db
     def declare_constant(self, *args, **kwargs):
         return self.local_db.declare_constant(*args, **kwargs)
-        
+
     def get_constant(self, *args, **kwargs):
         return self.local_db.get_constant(*args, **kwargs)
-        
+
     def get_constant_latest(self, *args, **kwargs):
         return self.local_db.get_constant_latest(*args, **kwargs)
-        
+
     def retire_constant(self, *args, **kwargs):
         return self.local_db.retire_constant(*args, **kwargs)
-        
+
     def list_constants(self, *args, **kwargs):
         return self.local_db.list_constants(*args, **kwargs)
 
     def declare_function(self, *args, **kwargs):
         return self.local_db.declare_function(*args, **kwargs)
-        
+
     def get_function(self, *args, **kwargs):
         return self.local_db.get_function(*args, **kwargs)
-        
+
     def retire_function(self, *args, **kwargs):
         return self.local_db.retire_function(*args, **kwargs)
-        
+
     def list_functions(self, *args, **kwargs):
         return self.local_db.list_functions(*args, **kwargs)
-        
+
     def call_function(self, *args, **kwargs):
         return self.local_db.call_function(*args, **kwargs)
-        
+
     def get_function_lineage(self, *args, **kwargs):
         return self.local_db.get_function_lineage(*args, **kwargs)
 
     def record_inference(self, *args, **kwargs):
         return self.local_db.record_inference(*args, **kwargs)
-        
+
     def get_inference(self, *args, **kwargs):
         return self.local_db.get_inference(*args, **kwargs)
-        
+
     def search_inferences(self, *args, **kwargs):
         return self.local_db.search_inferences(*args, **kwargs)
-        
+
     def compare_inferences(self, *args, **kwargs):
         return self.local_db.compare_inferences(*args, **kwargs)
-        
+
     def get_retirement_tag(self, *args, **kwargs):
         return self.local_db.get_retirement_tag(*args, **kwargs)
 
