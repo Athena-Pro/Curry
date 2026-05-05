@@ -9,6 +9,7 @@ import hashlib
 import uuid
 import base64
 import ast
+import time
 from typing import Any, Dict, List, Optional, Set
 from dataclasses import dataclass
 from enum import Enum
@@ -146,6 +147,11 @@ class Curry:
 
         try:
             cursor.execute("ALTER TABLE functions ADD COLUMN arg_descriptions TEXT")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            cursor.execute("ALTER TABLE constants ADD COLUMN description TEXT")
         except sqlite3.OperationalError:
             pass
 
@@ -422,6 +428,7 @@ class Curry:
         version: int,
         value: Any,
         type_signature: str,
+        description: Optional[str] = None,
     ) -> None:
         """Declare a new version of a constant."""
         # Serialize early to fail fast on bad types before touching the DB.
@@ -457,9 +464,9 @@ class Curry:
 
         try:
             cursor.execute(
-                """INSERT INTO constants (id, version, value, type_signature)
-                   VALUES (?, ?, ?, ?)""",
-                (const_id, version, value_blob, type_signature)
+                """INSERT INTO constants (id, version, value, type_signature, description)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (const_id, version, value_blob, type_signature, description)
             )
             self.conn.commit()
         except sqlite3.IntegrityError:
@@ -506,6 +513,22 @@ class Curry:
             raise ValueError(f"Constant {const_id}@v{version} is already retired")
         self.conn.commit()
 
+    def retire_constant_with_reason(
+        self,
+        const_id: str,
+        version: int,
+        reason: str,
+        description: Optional[str] = None,
+    ) -> str:
+        """Create a retirement tag and retire a constant in one step.
+
+        Returns the generated retirement tag ID.
+        """
+        tag_id = f"retire_{const_id}_v{version}_{int(time.time())}"
+        self.create_retirement_tag(tag_id, reason, description)
+        self.retire_constant(const_id, version, retirement_tag=tag_id)
+        return tag_id
+
     def get_constant(
         self,
         const_id: str,
@@ -514,7 +537,7 @@ class Curry:
         """Retrieve a constant by exact version."""
         cursor = self.conn.cursor()
         cursor.execute(
-            """SELECT id, version, value, type_signature, declared_at, retired_at
+            """SELECT id, version, value, type_signature, declared_at, retired_at, description
                FROM constants
                WHERE id = ? AND version = ?""",
             (const_id, version)
@@ -537,13 +560,14 @@ class Curry:
             "value": value,
             "type_signature": row["type_signature"],
             "declared_at": row["declared_at"],
+            "description": row["description"],
         }
 
     def get_constant_latest(self, const_id: str) -> Dict[str, Any]:
         """Get the most recent active version of a constant."""
         cursor = self.conn.cursor()
         cursor.execute(
-            """SELECT id, version, value, type_signature, declared_at
+            """SELECT id, version, value, type_signature, declared_at, description
                FROM constants
                WHERE id = ? AND retired_at IS NULL
                ORDER BY version DESC
@@ -564,6 +588,7 @@ class Curry:
             "value": value,
             "type_signature": row["type_signature"],
             "declared_at": row["declared_at"],
+            "description": row["description"],
         }
 
     def list_constants(self, active_only: bool = True) -> List[Dict[str, Any]]:
@@ -578,6 +603,45 @@ class Curry:
 
         if self.fallback_db:
             fallback_results = self.fallback_db.list_constants(active_only)
+            local_ids = {r["id"] for r in results}
+            for fr in fallback_results:
+                if fr["id"] not in local_ids:
+                    results.append(fr)
+
+        return results
+
+    def search_constants(
+        self,
+        prefix: Optional[str] = None,
+        type_signature: Optional[str] = None,
+        active_only: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """Search constants by ID prefix and/or type_signature."""
+        cursor = self.conn.cursor()
+        conditions = []
+        params: List[Any] = []
+
+        if prefix is not None:
+            conditions.append("id LIKE ?")
+            params.append(prefix + "%")
+        if type_signature is not None:
+            conditions.append("type_signature = ?")
+            params.append(type_signature)
+        if active_only:
+            conditions.append("retired_at IS NULL")
+
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        cursor.execute(
+            f"""SELECT id, MAX(version) as latest_version, type_signature, declared_at
+               FROM constants {where} GROUP BY id""",
+            params,
+        )
+        results = [dict(row) for row in cursor.fetchall()]
+
+        if self.fallback_db:
+            fallback_results = self.fallback_db.search_constants(
+                prefix=prefix, type_signature=type_signature, active_only=active_only
+            )
             local_ids = {r["id"] for r in results}
             for fr in fallback_results:
                 if fr["id"] not in local_ids:
@@ -785,6 +849,22 @@ class Curry:
                 raise KeyError(f"Function {name}@v{version} not found")
             raise ValueError(f"Function {name}@v{version} is already retired")
         self.conn.commit()
+
+    def retire_function_with_reason(
+        self,
+        name: str,
+        version: int,
+        reason: str,
+        description: Optional[str] = None,
+    ) -> str:
+        """Create a retirement tag and retire a function in one step.
+
+        Returns the generated retirement tag ID.
+        """
+        tag_id = f"retire_{name}_v{version}_{int(time.time())}"
+        self.create_retirement_tag(tag_id, reason, description)
+        self.retire_function(name, version, retirement_tag=tag_id)
+        return tag_id
 
     def list_functions(self, active_only: bool = True) -> List[Dict[str, Any]]:
         """List all functions with their latest versions."""
@@ -1418,6 +1498,12 @@ class CurrySession:
     def list_constants(self, *args, **kwargs):
         return self.local_db.list_constants(*args, **kwargs)
 
+    def search_constants(self, *args, **kwargs):
+        return self.local_db.search_constants(*args, **kwargs)
+
+    def retire_constant_with_reason(self, *args, **kwargs):
+        return self.local_db.retire_constant_with_reason(*args, **kwargs)
+
     def declare_function(self, *args, **kwargs):
         return self.local_db.declare_function(*args, **kwargs)
 
@@ -1426,6 +1512,9 @@ class CurrySession:
 
     def retire_function(self, *args, **kwargs):
         return self.local_db.retire_function(*args, **kwargs)
+
+    def retire_function_with_reason(self, *args, **kwargs):
+        return self.local_db.retire_function_with_reason(*args, **kwargs)
 
     def list_functions(self, *args, **kwargs):
         return self.local_db.list_functions(*args, **kwargs)

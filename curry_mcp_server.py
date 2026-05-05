@@ -140,6 +140,7 @@ def build_server(session: CurrySession) -> Server:
                         "version": _int_prop("Version number (must exceed current max)"),
                         "value": {"description": "The constant value (must match type_signature)"},
                         "type_signature": _str_prop("One of: Float64, Int32, String, Blob, Json, Tokens, Currency, Bool"),
+                        "description": _str_prop("Optional human-readable description of what this constant represents"),
                     },
                     "required": ["const_id", "version", "value", "type_signature"],
                 },
@@ -186,6 +187,23 @@ def build_server(session: CurrySession) -> Server:
             ),
 
             types.Tool(
+                name=t("search_constants"),
+                description=(
+                    "Search constants by ID prefix and/or type. "
+                    "Returns merged results from both the project DB and the global core DB."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "prefix": _str_prop("Filter constants whose ID starts with this string"),
+                        "type_signature": _str_prop("Filter by type, e.g. Float64"),
+                        "active_only": _bool_prop("If true (default), exclude retired constants"),
+                    },
+                    "required": [],
+                },
+            ),
+
+            types.Tool(
                 name=t("retire_constant"),
                 description="Mark a specific constant version as retired.",
                 inputSchema={
@@ -196,6 +214,24 @@ def build_server(session: CurrySession) -> Server:
                         "retirement_tag": _str_prop("Optional retirement tag ID"),
                     },
                     "required": ["const_id", "version"],
+                },
+            ),
+
+            types.Tool(
+                name=t("retire_constant_with_reason"),
+                description=(
+                    "Create a retirement tag and retire a constant version in one step. "
+                    "Returns the generated retirement tag ID."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "const_id": _str_prop("Constant identifier"),
+                        "version": _int_prop("Version to retire"),
+                        "reason": _str_prop("Short reason for retirement"),
+                        "description": _str_prop("Optional longer description"),
+                    },
+                    "required": ["const_id", "version", "reason"],
                 },
             ),
 
@@ -320,6 +356,24 @@ def build_server(session: CurrySession) -> Server:
                         "retirement_tag": _str_prop("Optional retirement tag ID"),
                     },
                     "required": ["name", "version"],
+                },
+            ),
+
+            types.Tool(
+                name=t("retire_function_with_reason"),
+                description=(
+                    "Create a retirement tag and retire a function version in one step. "
+                    "Returns the generated retirement tag ID."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "name": _str_prop("Function name"),
+                        "version": _int_prop("Version to retire"),
+                        "reason": _str_prop("Short reason for retirement"),
+                        "description": _str_prop("Optional longer description"),
+                    },
+                    "required": ["name", "version", "reason"],
                 },
             ),
 
@@ -571,6 +625,7 @@ def build_server(session: CurrySession) -> Server:
                     version=arguments["version"],
                     value=arguments["value"],
                     type_signature=arguments["type_signature"],
+                    description=arguments.get("description"),
                 )
                 return _ok({"status": "declared", "const_id": arguments["const_id"], "version": arguments["version"]})
 
@@ -583,6 +638,13 @@ def build_server(session: CurrySession) -> Server:
             if bare == "list_constants":
                 return _ok(session.list_constants(active_only=arguments.get("active_only", True)))
 
+            if bare == "search_constants":
+                return _ok(session.search_constants(
+                    prefix=arguments.get("prefix"),
+                    type_signature=arguments.get("type_signature"),
+                    active_only=arguments.get("active_only", True),
+                ))
+
             if bare == "retire_constant":
                 session.retire_constant(
                     arguments["const_id"],
@@ -591,7 +653,14 @@ def build_server(session: CurrySession) -> Server:
                 )
                 return _ok({"status": "retired", "const_id": arguments["const_id"], "version": arguments["version"]})
 
-            # ── Functions ─────────────────────────────────────────────────────
+            if bare == "retire_constant_with_reason":
+                tag_id = session.retire_constant_with_reason(
+                    arguments["const_id"],
+                    arguments["version"],
+                    reason=arguments["reason"],
+                    description=arguments.get("description"),
+                )
+                return _ok({"status": "retired", "const_id": arguments["const_id"], "version": arguments["version"], "tag_id": tag_id})            # ── Functions ─────────────────────────────────────────────────────
             if bare == "declare_function":
                 session.declare_function(
                     name=arguments["name"],
@@ -630,6 +699,15 @@ def build_server(session: CurrySession) -> Server:
                     retirement_tag=arguments.get("retirement_tag"),
                 )
                 return _ok({"status": "retired", "name": arguments["name"], "version": arguments["version"]})
+
+            if bare == "retire_function_with_reason":
+                tag_id = session.retire_function_with_reason(
+                    arguments["name"],
+                    arguments["version"],
+                    reason=arguments["reason"],
+                    description=arguments.get("description"),
+                )
+                return _ok({"status": "retired", "name": arguments["name"], "version": arguments["version"], "tag_id": tag_id})
 
             # ── Models ────────────────────────────────────────────────────────
             if bare == "get_model":
