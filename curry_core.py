@@ -76,6 +76,15 @@ class Curry:
         """Create all tables and triggers for Curry."""
         cursor = self.conn.cursor()
 
+        # Skip all DDL on read-only connections (e.g. core_db opened via mode=ro URI).
+        # The schema is assumed to be current on disk; migrations were applied the last
+        # time the DB was opened in write mode.  SAVEPOINT is the cheapest write probe.
+        try:
+            cursor.execute("SAVEPOINT __schema_probe__")
+            cursor.execute("RELEASE SAVEPOINT __schema_probe__")
+        except sqlite3.OperationalError:
+            return  # read-only connection — nothing to migrate
+
         # Retirement tags: group related retirements
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS retirement_tags (
@@ -648,6 +657,111 @@ class Curry:
                     results.append(fr)
 
         return results
+
+    def compare_constants(
+        self,
+        const_id: str,
+        version_a: int,
+        version_b: int,
+    ) -> Dict[str, Any]:
+        """Structured diff between two versions of a constant.
+
+        Both retired and active versions are compared.  Returns a dict with:
+        - ``same_type``: bool — whether both versions share the same type_signature
+        - ``same_value``: bool — deep equality of deserialized values
+        - ``version_a`` / ``version_b``: the input version numbers
+        - ``declared_a`` / ``declared_b``: ISO timestamps when each was declared
+        - ``retired_a`` / ``retired_b``: ISO timestamps when each was retired, or None
+        - ``type_a`` / ``type_b``: type_signature strings
+        - ``value_a`` / ``value_b``: deserialized values (may be large — callers beware)
+        """
+        cursor = self.conn.cursor()
+
+        def _fetch(ver: int) -> sqlite3.Row:
+            cursor.execute(
+                """SELECT id, version, value, type_signature, declared_at, retired_at
+                   FROM constants
+                   WHERE id = ? AND version = ?""",
+                (const_id, ver),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                if self.fallback_db:
+                    fb_cur = self.fallback_db.conn.cursor()
+                    fb_cur.execute(
+                        """SELECT id, version, value, type_signature, declared_at, retired_at
+                           FROM constants WHERE id = ? AND version = ?""",
+                        (const_id, ver),
+                    )
+                    row = fb_cur.fetchone()
+                if row is None:
+                    raise KeyError(f"Constant {const_id}@v{ver} not found")
+            return row
+
+        row_a = _fetch(version_a)
+        row_b = _fetch(version_b)
+
+        val_a = self._deserialize_constant_value(row_a["value"], row_a["type_signature"])
+        val_b = self._deserialize_constant_value(row_b["value"], row_b["type_signature"])
+
+        return {
+            "const_id": const_id,
+            "version_a": version_a,
+            "version_b": version_b,
+            "same_type": row_a["type_signature"] == row_b["type_signature"],
+            "same_value": val_a == val_b,
+            "type_a": row_a["type_signature"],
+            "type_b": row_b["type_signature"],
+            "value_a": val_a,
+            "value_b": val_b,
+            "declared_a": row_a["declared_at"],
+            "declared_b": row_b["declared_at"],
+            "retired_a": row_a["retired_at"],
+            "retired_b": row_b["retired_at"],
+        }
+
+    def get_constant_at_timestamp(
+        self,
+        const_id: str,
+        timestamp: str,
+    ) -> Dict[str, Any]:
+        """Return the active version of a constant at a given ISO-8601 UTC timestamp.
+
+        A version is considered active at time T when:
+            declared_at <= T  AND  (retired_at IS NULL  OR  retired_at > T)
+
+        The highest such version is returned (i.e. the one that was declared most
+        recently before T).  Raises ``KeyError`` when no version was active at T.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """SELECT id, version, value, type_signature, declared_at, retired_at
+               FROM constants
+               WHERE id = ?
+                 AND declared_at <= ?
+                 AND (retired_at IS NULL OR retired_at > ?)
+               ORDER BY version DESC
+               LIMIT 1""",
+            (const_id, timestamp, timestamp),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            if self.fallback_db:
+                return self.fallback_db.get_constant_at_timestamp(const_id, timestamp)
+            raise KeyError(
+                f"No active version of constant {const_id!r} found at {timestamp!r}"
+            )
+
+        value = self._deserialize_constant_value(row["value"], row["type_signature"])
+        return {
+            "id": row["id"],
+            "version": row["version"],
+            "value": value,
+            "type_signature": row["type_signature"],
+            "declared_at": row["declared_at"],
+            "retired_at": row["retired_at"],
+            "query_timestamp": timestamp,
+        }
 
     # ============================================================================
     # FUNCTION OPERATIONS
@@ -1500,6 +1614,12 @@ class CurrySession:
 
     def search_constants(self, *args, **kwargs):
         return self.local_db.search_constants(*args, **kwargs)
+
+    def compare_constants(self, *args, **kwargs):
+        return self.local_db.compare_constants(*args, **kwargs)
+
+    def get_constant_at_timestamp(self, *args, **kwargs):
+        return self.local_db.get_constant_at_timestamp(*args, **kwargs)
 
     def retire_constant_with_reason(self, *args, **kwargs):
         return self.local_db.retire_constant_with_reason(*args, **kwargs)
