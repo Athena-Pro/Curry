@@ -41,7 +41,7 @@ This makes Curry useful for reproducible ML pipelines, prompt A/B testing, fine-
 Curry separates global schema from local project provenance:
 
 ```
-C:\AI-Local\Curry\
+C:\path\to\Curry\
     curry_core.db       ← global: model registrations, shared constants
     curry_backup.py
 
@@ -62,7 +62,7 @@ C:\AI-Local\Curry\
 ```python
 from curry_core import CurrySession
 
-with CurrySession.from_project(r"C:\my-project") as session:
+with CurrySession.from_project(r"C:\path\to\my-project") as session:
     # model lookup goes to core_db (read-only)
     model = session.get_model_latest("claude-sonnet-4-6")
     # inference write goes to local_db
@@ -81,7 +81,7 @@ with CurrySession.from_project(r"C:\my-project") as session:
 {
     "project": "my-project",
     "version": 1,
-    "core_db": "C:/AI-Local/Curry/curry_core.db",
+    "core_db": "C:/path/to/Curry/curry_core.db",
     "local_db": ".curry/curry.db",
     "default_model": "claude-sonnet-4-6",
     "default_model_version": 1,
@@ -130,7 +130,7 @@ Model versions lock all inference parameters at registration time.
 
 ```python
 # Admin operation — done once, outside any project session
-with Curry(r"C:\AI-Local\Curry\curry_core.db") as admin:
+with Curry(r"C:\path\to\Curry\curry_core.db") as admin:
     admin.register_model(
         model_name="claude-sonnet-4-6",
         version=1,
@@ -224,7 +224,7 @@ Supported: `"claude"` (Anthropic), `"openai"` (OpenAI), `"local"` (Ollama / llam
 `curry_backup.py` is a standalone rotation script with post-backup `PRAGMA integrity_check`. Schedule it with Windows Task Scheduler:
 
 ```
-schtasks /create /tn "CurryDailyBackup" /tr "python C:\AI-Local\Curry\curry_backup.py" /sc daily /st 03:00 /f
+schtasks /create /tn "CurryDailyBackup" /tr "python C:\path\to\Curry\curry_backup.py" /sc daily /st 03:00 /f
 ```
 
 Pre-migration snapshots go in `backups\migrations\` and are never rotated out.
