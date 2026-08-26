@@ -887,6 +887,42 @@ def test_validate_function_body_unbound_variable():
     db.close()
 
 
+def test_validate_function_body_rejects_format_dunder_escape():
+    """str.format()/.format_map() parse '{0.__class__...}' field specs at
+    runtime, walking attributes via getattr on whatever is passed in --
+    invisible to the AST walk, which only inspects literal Attribute/Name
+    nodes and never looks inside string constant contents. A function
+    depending on any other function via function_bindings gets a real Python
+    closure bound into its eval_context (see call_function), and a closure's
+    __globals__ is the whole curry_core module namespace -- so this body used
+    to be a working sandbox escape, not just a theoretical one."""
+    db = Curry()
+    db.declare_function("helper", 1, "1")
+
+    exploit = "'{0.__globals__}'.format(helper)"
+    try:
+        db.declare_function("evil", 1, exploit, function_bindings={"helper": 1})
+        raise AssertionError("Should reject a .format() dunder-traversal body")
+    except ValueError as e:
+        assert "format" in str(e).lower()
+
+    exploit_map = "'{0[__class__]}'.format_map({'0': helper})"
+    try:
+        db.declare_function("evil2", 1, exploit_map, function_bindings={"helper": 1})
+        raise AssertionError("Should reject a .format_map() dunder-traversal body")
+    except ValueError:
+        pass
+
+    # Plain string building has no attribute/item traversal grammar and must
+    # keep working: str(), concatenation, and %-formatting are unaffected.
+    db.declare_constant("prefix", 1, "hello ", TypeSignature.STRING.value)
+    db.declare_function(
+        "greet", 1, "prefix + str(x)", constant_bindings={"prefix": 1}, expected_args=["x"]
+    )
+    assert db.call_function("greet", 1, {"x": "world"}) == "hello world"
+    db.close()
+
+
 def test_backup_database():
     import os
     with Curry() as db:
@@ -1123,6 +1159,7 @@ def run_all_tests():
     runner.test("Get model latest", test_get_model_latest)
     runner.test("Context manager", test_context_manager)
     runner.test("Validate function body unbound variable", test_validate_function_body_unbound_variable)
+    runner.test("Validate function body rejects format() dunder escape", test_validate_function_body_rejects_format_dunder_escape)
     runner.test("Backup database", test_backup_database)
     runner.test("Two-tier CurrySession architecture", test_two_tier_session)
     runner.test("Function description and arg_descriptions stored and retrieved", test_function_description_fields)
