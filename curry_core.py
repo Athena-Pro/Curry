@@ -23,6 +23,19 @@ _SAFE_BUILTINS = {
     "round": round
 }
 
+# str.format / str.format_map parse "{0.__class__...}"-style field specs at
+# RUNTIME, walking attributes and items on whatever value is passed in via
+# getattr/getitem -- including dunder attributes. That traversal happens
+# entirely inside the *contents* of a string constant, so validate_function_body's
+# AST walk below never sees it: '{0.__globals__}'.format(x) contains no literal
+# dunder-prefixed Attribute or Name node anywhere in the source tree, only an
+# innocuous-looking .format() call. Any function_bindings entry hands eval_context
+# a real Python closure (see call_function), and a closure's __globals__ is the
+# whole curry_core module namespace -- so this was a working sandbox escape, not
+# a theoretical one. str(), string concatenation, and %-formatting don't support
+# attribute/item traversal and stay allowed.
+_UNSAFE_STR_METHODS = frozenset({"format", "format_map"})
+
 
 class TypeSignature(Enum):
     """Supported type signatures for constants."""
@@ -782,6 +795,12 @@ class Curry:
                     raise ValueError(f"Unsafe dunder attribute access: .{node.attr}")
                 if isinstance(node.value, ast.Name) and node.value.id.startswith("__"):
                     raise ValueError(f"Unsafe access on {node.value.id}")
+                if node.attr in _UNSAFE_STR_METHODS:
+                    raise ValueError(
+                        f"Unsafe method .{node.attr}() -- format-string field specs can reach "
+                        "dunder attributes (e.g. '{0.__class__}') at runtime, invisible to this "
+                        "static check. Build strings with concatenation or f-strings instead."
+                    )
 
             if isinstance(node, ast.Name):
                 if node.id not in allowed_names and node.id not in _SAFE_BUILTINS:
