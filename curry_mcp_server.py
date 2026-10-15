@@ -41,7 +41,7 @@ try:
     from curry_core import CurrySession
 except ImportError:
     print(
-        "curry_core not found. Run this script from C:\\AI-Local\\Curry\\",
+        "curry_core not found. Run this script from the Curry root directory.",
         file=sys.stderr,
     )
     sys.exit(1)

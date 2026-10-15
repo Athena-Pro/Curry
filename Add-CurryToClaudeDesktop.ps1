@@ -22,10 +22,10 @@
     Overwrite an existing mcpServers entry with the same name.
 
 .EXAMPLE
-    .\Add-CurryToClaudeDesktop.ps1 -ProjectDir C:\Projects\my-ai-pipeline
+    .\Add-CurryToClaudeDesktop.ps1 -ProjectDir C:\path\to\my-ai-pipeline
 
 .EXAMPLE
-    .\Add-CurryToClaudeDesktop.ps1 -ProjectDir C:\Projects\my-ai-pipeline -ServerName curry-pipeline -Force
+    .\Add-CurryToClaudeDesktop.ps1 -ProjectDir C:\path\to\my-ai-pipeline -ServerName curry-pipeline -Force
 #>
 
 [CmdletBinding()]
